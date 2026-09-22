@@ -1,0 +1,39 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 줄바꿈 정책
+#
+# ⚠️ 이 파일이 없으면 Windows 에서 커밋할 때 git 이 셸 스크립트를 CRLF 로 바꾸고,
+#    Linux pod 에서 다음 오류로 실행이 실패한다.
+#
+#      bash: ./setup_pod.sh: /usr/bin/env: bad interpreter: No such file or directory
+#      (실제 원인은 줄 끝의 ^M)
+#
+#    pod 실행이 이 패키지의 목적이므로 셸 스크립트는 **반드시 LF** 로 고정한다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 기본: git 이 텍스트/바이너리를 판별하되 작업 트리 변환은 하지 않는다
+*               -text
+
+# 셸 스크립트 — LF 고정 (Linux 에서 실행되어야 한다)
+*.sh            text eol=lf
+Makefile        text eol=lf
+
+# 파이썬·설정·문서 — LF 고정 (플랫폼 간 diff 잡음 방지)
+*.py            text eol=lf
+*.txt           text eol=lf
+*.md            text eol=lf
+*.ini           text eol=lf
+*.cfg           text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+
+# 노트북 — LF 고정. JSON 이라 CRLF 가 섞이면 diff 가 통째로 바뀐다
+*.ipynb         text eol=lf
+
+# 데이터·산출물 — 바이너리 취급 (변환 금지)
+*.csv           -text
+*.png           binary
+*.pdf           binary
+*.pptx          binary
+*.hwpx          binary

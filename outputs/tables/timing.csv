@@ -1,0 +1,11 @@
+﻿항목,초
+Optuna LightGBM 회귀,95.435
+Optuna 피크분류,82.92
+Seasonal Naive CV(D1),0.576
+Random Forest (보정) CV(D1),115.956
+LightGBM CV(D1),3.43
+2단계 레짐(2분류) CV(D1),17.758
+2단계 레짐(3분류) CV(D1),20.314
+피크 직접분류 CV(D1),1.692
+DNN (MLP) CV(D1),179.593
+분위회귀·Conformal,3.179

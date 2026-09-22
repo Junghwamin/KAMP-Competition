@@ -1,0 +1,19 @@
+# 제6회 K-인공지능 제조데이터 분석 경진대회 ⑤ 자원 최적화
+# Python 3.11.9
+
+numpy==2.3.5
+pandas==3.0.5
+scikit-learn==1.9.1
+scipy==1.17.1
+matplotlib==3.11.1
+lightgbm==4.7.0
+optuna==5.0.0
+shap==0.51.0
+statsmodels==0.14.6
+tensorflow==2.21.0
+python-pptx==1.0.2
+jupyter
+nbformat
+
+# 공휴일은 외부 패키지(holidays/workalendar) 대신 2021 상수 리스트를 사용한다
+# (폐쇄망 심사환경 대응)

@@ -1,0 +1,14 @@
+# 빌드·검증용 추가 의존성.
+# 노트북을 **실행**만 할 사람은 requirements.txt 만 설치하면 된다.
+# 이 파일은 노트북을 src/ 에서 다시 조립하거나 테스트를 돌릴 때 필요하다.
+
+-r requirements.txt
+
+# src/*.py (percent 포맷) → .ipynb 조립  (tools/build_notebook.py)
+jupytext==1.19.1
+
+# 노트북 배치 실행 + 마감  (tools/finalize_notebook.py)
+nbconvert==7.16.6
+
+# 단계별 검증 테스트 236개
+pytest==9.0.2

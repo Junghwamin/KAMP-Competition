@@ -1,0 +1,17 @@
+﻿표,일치,사유,비교 셀 수,최대 절대차,제외 컬럼(실행시간)
+ch2_regression,True,,54,0.0,학습시간(초)
+ch2_peak_detection,True,,112,0.0,-
+ch2_peak_detection_oof,True,,77,0.0,-
+ch2_ablation,True,,30,0.0,-
+ch2_scorecard,True,,48,0.0,참고: 학습시간(초)
+ch2_significance,True,,45,0.0,-
+ch2_d1_vs_d2,True,,60,0.0,-
+ch3_importance,True,,25,0.0,-
+ch3_condition_mae,True,,63,0.0,-
+ch3_rules,True,,15,0.0,-
+ch4_levers,True,,56,0.0,-
+ch4_scenarios,True,,56,0.0,-
+ch5_calibration,True,,6,0.0,-
+ch5_uncertainty,True,,15,0.0,-
+ch1_theta,True,,10,0.0,-
+ch3_folds,True,,50,0.0,-

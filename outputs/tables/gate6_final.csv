@@ -1,0 +1,12 @@
+﻿점검,통과
+예측결과 336행·결측 0,True
+예측결과 9컬럼 규격,True
+그림 생성 수 == 인덱스 행 수,True
+장별 요건 전부 충족,True
+4·5·6장 본문 초안 존재,True
+requirements.txt 존재,True
+진입 문서(00_README.md) 존재,True
+환경 증거 생성,True
+이중 축·freq='H' 0건,True
+제출 대상 개인정보 0건,True
+채움표 30항목 이상,True

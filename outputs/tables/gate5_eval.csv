@@ -1,0 +1,7 @@
+﻿점검,통과
+최종모델이 최선 베이스라인보다 MAE 낮음,True
+MAE 차이 95% CI가 0 미포함,False
+달력규칙 대비 FP 감소,True
+D2에서 순위 보존(Spearman > 0.7),True
+Ablation 5행 산출,True
+추론시간 측정 완료,True
