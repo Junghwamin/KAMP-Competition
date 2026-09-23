@@ -89,6 +89,10 @@ tools/                    빌드·마감·재현성 검사 스크립트
 tests/                    검증 테스트 236개
 
 reference/                대회 원본 자료 (과제공개, 보고서양식, 가이드북 원본)
+video/                    해설·강의 영상 (1080p, 한글 자막 트랙 내장) — 목차는 video/README.md
+  ep01~ep06_*.mp4           개요 해설 6편 (43분)
+  모델/ · 평가지표/          모델 9편 · 평가지표 13편 강의 (2시간 53분)
+                            용량이 커서(합계 약 700MB) 제출 zip 에 넣을지는 따로 정하세요
 _dev_docs/                개발 문서 — 제출 zip 에는 넣지 마세요
 ```
 
@@ -116,6 +120,7 @@ _dev_docs/                개발 문서 — 제출 zip 에는 넣지 마세요
 | 모델 성능 비교표 | `outputs/tables/ch2_regression.csv`, `ch2_peak_detection.csv` |
 | 피크 저감 시나리오 | `outputs/tables/ch4_scenarios.csv` |
 | 4·5·6장 본문 초안 | `outputs/report_ch4_draft.md` · `ch5` · `ch6` |
+| 영상으로 이해하기 (개요 6편 + 모델·평가지표 강의 22편) | [`video/README.md`](video/README.md) |
 
 ---
 
