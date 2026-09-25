@@ -1,0 +1,43 @@
+# ⚠️ 이 파일은 **참고용**이다. 공유 환경(KAMP 포드 등)에서 그대로 설치하지 말 것.
+#
+# 실제로 KAMP 포드에서 이 핀을 그대로 밀어넣었다가 막혔다:
+#   ERROR: Could not install packages due to an OSError:
+#          [Errno 13] Permission denied: 'METADATA'
+# 이미 있는 numpy 를 갈아끼우려다 권한에서 막힌 것이고, pip 가 교체 도중 죽으면서
+# site-packages 에 `~umpy` 잔해까지 남았다. 자세한 건 README 9절.
+#
+# ── 공유 환경에서 올바른 설치법 ────────────────────────────────────────
+#   기존 버전을 constraints 로 묶고, 없는 패키지만 핀 없이 깐다:
+#
+#     python - <<'PY' > constraints.txt
+#     import importlib.metadata as md
+#     for p in ["numpy","pandas","scipy","scikit-learn","matplotlib","lightgbm",
+#               "statsmodels","tensorflow","keras"]:
+#         try: print(f"{p}=={md.version(p)}")
+#         except Exception: pass
+#     PY
+#     pip install --no-cache-dir -c constraints.txt optuna shap
+#
+#   `bash setup_pod.sh` 가 이 과정을 자동으로 한다.
+# ──────────────────────────────────────────────────────────────────────
+#
+# 아래 버전은 **개발·검증 환경의 값**이다. 단독 환경에서 똑같이 맞추고 싶을 때만
+# `bash setup_pod.sh --pin` 또는 `pip install -r requirements.txt` 를 쓴다.
+#
+# 참고: KAMP 포드의 실제 버전은 이보다 낮았고(numpy 1.26.4 / pandas 2.1.4 /
+# tensorflow 2.17.0 등) **그 상태로 완주했다.** 억지로 맞출 이유가 없다.
+
+numpy==2.3.5
+pandas==3.0.5
+scipy==1.17.1
+scikit-learn==1.9.1
+matplotlib==3.11.1
+lightgbm==4.7.0
+optuna==5.0.0
+statsmodels==0.14.6
+tensorflow==2.21.0
+shap==0.51.0
+
+# 노트북 실행용 (주피터 환경이면 이미 있을 수 있다)
+ipykernel==7.1.0
+nbconvert==7.16.6

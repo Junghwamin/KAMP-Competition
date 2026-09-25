@@ -549,7 +549,7 @@ def usable_mask(d: pd.DataFrame, cond: str = "D1") -> pd.Series:
     return ok & condition_mask(d, cond)
 
 
-def get_fold_data(fold: int, cond: str = "D1", features=None):
+def get_fold_data(fold: int, cond: str = "D1", features=None, frame=None):
     """fold의 (X_train, y_train, X_val, y_val, val_index)를 돌려준다.
 
     Parameters
@@ -560,14 +560,18 @@ def get_fold_data(fold: int, cond: str = "D1", features=None):
         데이터 조건. **3장 이후 모든 함수가 이 인자를 받는다.**
     features : list[str], optional
         사용할 피처. 기본은 전체(ablation에서 부분집합을 넘긴다).
+    frame : pandas.DataFrame, optional
+        피처 프레임. 기본은 `feat`. 6.6절이 피처 값을 바꾼 프레임(휴무 인지형 지연변수,
+        잡음 변수 추가)을 넘긴다. 행·마스크는 `feat` 와 같아야 한다.
     """
+    d = feat if frame is None else frame
     cols = list(features) if features is not None else FEATURE_COLS
-    tr, va = fold_slices(feat, fold)
-    ok = usable_mask(feat, cond)
+    tr, va = fold_slices(d, fold)
+    ok = usable_mask(d, cond)
     tr, va = tr & ok, va & ok
-    ytr = feat.loc[tr, ["y_avg", "y_peak", "y_cls"]]
-    yva = feat.loc[va, ["y_avg", "y_peak", "y_cls"]]
-    return feat.loc[tr, cols], ytr, feat.loc[va, cols], yva, feat.index[va]
+    ytr = d.loc[tr, ["y_avg", "y_peak", "y_cls"]]
+    yva = d.loc[va, ["y_avg", "y_peak", "y_cls"]]
+    return d.loc[tr, cols], ytr, d.loc[va, cols], yva, d.index[va]
 
 
 def get_test_data(cond: str = "D1", features=None):

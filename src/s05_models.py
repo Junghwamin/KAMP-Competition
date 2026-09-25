@@ -94,7 +94,7 @@ def _timed(label: str, fn, *args, **kwargs):
     return out
 
 
-def run_cv(name: str, fit_fn, cond: str = "D1", features=None) -> dict:
+def run_cv(name: str, fit_fn, cond: str = "D1", features=None, frame=None) -> dict:
     """fold 2~5를 돌며 OOF 예측과 fold별 지표를 수집한다.
 
     Parameters
@@ -107,6 +107,8 @@ def run_cv(name: str, fit_fn, cond: str = "D1", features=None) -> dict:
         데이터 조건.
     features : list[str], optional
         사용할 피처 부분집합(ablation 용).
+    frame : pandas.DataFrame, optional
+        피처 값을 바꾼 프레임(6.6절). 기본은 `feat`.
 
     Returns
     -------
@@ -116,7 +118,7 @@ def run_cv(name: str, fit_fn, cond: str = "D1", features=None) -> dict:
     parts, rows = [], []
     t0 = time.perf_counter()
     for fold in ACTIVE_FOLDS:
-        Xtr, ytr, Xva, yva, idx = get_fold_data(fold, cond, features)
+        Xtr, ytr, Xva, yva, idx = get_fold_data(fold, cond, features, frame)
         out = fit_fn(Xtr, ytr, Xva)
         pa = np.asarray(out["pred_avg"], float)
         pp = np.asarray(out.get("pred_peak", pa), float)
@@ -167,6 +169,10 @@ def run_test(name: str, fit_fn, cond: str = "D1", features=None) -> dict:
         "pred_avg": pa, "pred_peak": pp,
         "prob": np.asarray(prob, float) if prob is not None else None,
         "infer_sec": infer_sec,
+        # 제출 예측을 만든 **바로 그 적합 객체**(LightGBM 계열만) — 10.5절 모델 번들이 저장한다.
+        # RF·DNN 은 보관하지 않는다(메모리). 키 이름은 `_models` 가 아니다:
+        # s06 measure_inference_time 이 `_models` 로 분기하므로 그 이름을 쓰면 INFER_SEC 가 바뀐다.
+        "_artifacts": out.get("_artifacts"),
     }
 
 
@@ -338,6 +344,18 @@ def make_regime_model(n_classes: int = 2, gate_features=None):
             "pred_peak": predict(Xva, "y_peak"),
             "_gate": gate,
             "_predict": lambda X: predict(X, "y_avg"),
+            # 모델 번들(10.5절)용 적합 객체. 클로저 `predict` 는 pickle 할 수 없으므로
+            # 부스터와 라우팅 정보를 그대로 노출하고, 저장은 LightGBM 네이티브 텍스트로 한다.
+            "_artifacts": {
+                "kind": "regime",
+                "n_classes": int(n_classes),
+                "gcols": list(gcols),
+                "gate": gate,
+                "gate_n_estimators": int(gate.n_estimators),
+                "classes": [int(c) for c in gate.classes_],
+                "regs": regs,
+                "fallbacks": fallbacks,
+            },
         }
 
     return fit_fn
@@ -433,7 +451,14 @@ def make_peak_classifier(params: dict | None = None):
         clf.fit(Xtr, ytr["y_cls"])
         prob = clf.predict_proba(Xva)[:, 1]
         # 회귀 예측이 없으므로 확률을 peak 스코어로 사용한다
-        return {"pred_avg": np.full(len(Xva), np.nan), "pred_peak": prob, "prob": prob}
+        return {
+            "pred_avg": np.full(len(Xva), np.nan), "pred_peak": prob, "prob": prob,
+            # 모델 번들(10.5절)용. 파라미터는 모델 텍스트(6자리 반올림)가 아니라 이 dict 가 정본이다.
+            "_artifacts": {
+                "kind": "binary_clf", "clf": clf, "params": dict(p),
+                "n_estimators": int(N_ESTIMATORS), "scale_pos_weight": float(neg / pos),
+            },
+        }
 
     return fit_fn
 
@@ -742,10 +767,18 @@ save_fig(_fig, "F21", "확률보정 Reliability", "5.7", source_table=_src)
 # 추가로 **Split Conformal** 로 유한표본에서 피복 보장이 있는 구간을 만든다.
 
 # %%
-def quantile_intervals(cond: str = "D1") -> tuple[pd.DataFrame, dict]:
-    """분위회귀 예측구간과 Split Conformal 구간의 피복률을 비교한다."""
-    Xtr, ytr, Xte, yte, idx = get_test_data(cond)
-    # 학습구간의 뒤 20%를 보정(calibration) 집합으로 떼어낸다
+def fit_interval_models(Xtr: pd.DataFrame, ytr: pd.DataFrame, shutdown_days) -> dict:
+    """분위회귀(q10·q50·q90)와 Split Conformal 을 **학습구간만으로** 적합한다.
+
+    학습구간의 뒤 20%를 보정(calibration) 집합으로 떼어낸다. 평가(5.8절)와
+    모델 번들(10.5절의 배포 번들)이 **같은 레시피**를 쓰도록 적합부만 분리한 함수다.
+
+    Returns
+    -------
+    dict
+        `qmodels`({0.1,0.5,0.9: 모델}), `point`, `qhat`({'전체(휴무 포함)','운영일만(휴무 제외)'}),
+        `n_cal`, `fit_last`(적합 구간 끝 시각).
+    """
     n_cal = int(len(Xtr) * 0.2)
     Xfit, yfit = Xtr.iloc[:-n_cal], ytr.iloc[:-n_cal]
     Xcal, ycal = Xtr.iloc[-n_cal:], ytr.iloc[-n_cal:]
@@ -758,30 +791,45 @@ def quantile_intervals(cond: str = "D1") -> tuple[pd.DataFrame, dict]:
         m.fit(Xfit, yfit["y_avg"])
         qmodels[q] = m
 
-    lo = qmodels[0.1].predict(Xte)
-    mid = qmodels[0.5].predict(Xte)
-    hi = qmodels[0.9].predict(Xte)
-    cover_q = float(((yte["y_avg"] >= lo) & (yte["y_avg"] <= hi)).mean())
-
     # Split Conformal — 보정집합 잔차의 90% 분위로 대칭 구간을 만든다
     point = lgb.LGBMRegressor(n_estimators=N_ESTIMATORS, **LGB_BASE)
     point.fit(Xfit, yfit["y_avg"])
     resid_all = np.abs(ycal["y_avg"].to_numpy() - point.predict(Xcal))
-    p_te = point.predict(Xte)
 
     # ⚠️ 보정집합(학습구간 뒤 20% = 07월 중순~08월)에 **하계휴가 9일이 포함**되어
     #    잔차가 극단적으로 커진다. 이를 그대로 쓰면 구간이 무의미하게 넓어진다.
     #    운영일만으로 보정한 변형을 함께 보고해 차이를 드러낸다.
     # DatetimeIndex.isin() 은 Series 가 아니라 numpy 배열을 돌려준다
-    shutdown_days = operating_calendar.index[operating_calendar["is_shutdown"]]
     cal_operating = ~np.asarray(Xcal.index.normalize().isin(shutdown_days))
+    qhat = {
+        label: float(np.quantile(resid_all[mask], 0.9))
+        for label, mask in (("전체(휴무 포함)", np.ones(len(resid_all), bool)),
+                            ("운영일만(휴무 제외)", cal_operating))
+    }
+    return {
+        "qmodels": qmodels, "point": point, "qhat": qhat,
+        "n_cal": n_cal, "fit_last": str(Xfit.index.max()),
+    }
+
+
+def quantile_intervals(cond: str = "D1") -> tuple[pd.DataFrame, dict]:
+    """분위회귀 예측구간과 Split Conformal 구간의 피복률을 비교한다."""
+    Xtr, ytr, Xte, yte, idx = get_test_data(cond)
+    shutdown_days = operating_calendar.index[operating_calendar["is_shutdown"]]
+    fit = fit_interval_models(Xtr, ytr, shutdown_days)
+    qmodels, point = fit["qmodels"], fit["point"]
+
+    lo = qmodels[0.1].predict(Xte)
+    mid = qmodels[0.5].predict(Xte)
+    hi = qmodels[0.9].predict(Xte)
+    cover_q = float(((yte["y_avg"] >= lo) & (yte["y_avg"] <= hi)).mean())
+    p_te = point.predict(Xte)
+
     rows = [
         {"방법": "분위회귀 q10~q90", "보정집합": "학습구간 뒤 20%", "목표 피복률": 0.80,
          "실제 피복률": round(cover_q, 4), "평균 구간폭": round(float(np.mean(hi - lo)), 2)},
     ]
-    for label, mask in (("전체(휴무 포함)", np.ones(len(resid_all), bool)),
-                        ("운영일만(휴무 제외)", cal_operating)):
-        qhat = float(np.quantile(resid_all[mask], 0.9))
+    for label, qhat in fit["qhat"].items():
         cover = float(((yte["y_avg"] >= p_te - qhat) & (yte["y_avg"] <= p_te + qhat)).mean())
         rows.append(
             {"방법": "Split Conformal", "보정집합": label, "목표 피복률": 0.90,
@@ -789,7 +837,10 @@ def quantile_intervals(cond: str = "D1") -> tuple[pd.DataFrame, dict]:
         )
 
     tbl = pd.DataFrame(rows)
-    return tbl, {"idx": idx, "y": yte["y_avg"].to_numpy(), "lo": lo, "mid": mid, "hi": hi}
+    return tbl, {
+        "idx": idx, "y": yte["y_avg"].to_numpy(), "lo": lo, "mid": mid, "hi": hi,
+        "_fit": fit,  # 10.5절 평가 번들이 이 적합물을 그대로 저장한다
+    }
 
 
 uncertainty_tbl, _unc = _timed("분위회귀·Conformal", quantile_intervals, "D1")

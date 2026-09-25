@@ -43,7 +43,7 @@ for _d in ("src", "tools", "tests", "outputs"):
 # %% [markdown]
 # ## 2. 패키지 버전 대조
 #
-# 재현성 검증(722개 셀 소수 6자리 일치)이 **아래 조합**에서 이뤄졌습니다.
+# 재현성 검증(1,988개 셀 소수 6자리 일치)이 **아래 조합**에서 이뤄졌습니다.
 # 버전이 다르면 수치가 달라질 수 있어 불일치를 실패로 처리합니다.
 #
 # `pandas 3.0.5` 가 특히 중요합니다 — 무음실패 탐지(`ChainedAssignmentError` 승격)가
@@ -135,14 +135,14 @@ else:
 # %% [markdown]
 # ## 4. 디스크 여유
 #
-# `outputs/` 를 다시 만드는 데 약 10MB 가 필요합니다 (그림 39장 + 표 108개).
+# `outputs/` 를 다시 만드는 데 약 60MB 가 필요합니다 (그림 39장 + 표 114개 + 모델 번들 약 51MB).
 
 # %%
 import shutil
 
 _total, _used, _free = shutil.disk_usage(".")
 _gb = _free / 1024 ** 3
-print(f"{'OK  ' if _gb > 1 else 'FAIL'} 여유 공간 {_gb:.1f} GB (필요 ~10MB, 권장 1GB 이상)")
+print(f"{'OK  ' if _gb > 1 else 'FAIL'} 여유 공간 {_gb:.1f} GB (필요 ~60MB, 권장 1GB 이상)")
 if _gb <= 1:
     FAIL.append(f"디스크 여유가 부족하다 ({_gb:.1f} GB)")
 
@@ -188,20 +188,21 @@ RUN_GUIDE = """
      ※ FULL 실행은 CPU 에서 30~60분. 세션이 끊기면 처음부터 다시 돌려야 한다.
 
   B) 배치 실행 (권장 — 세션이 끊겨도 계속된다)
-     make run
+     bash run.sh run        (make 가 있으면 make run)
      로그 확인:  tail -f outputs/run.log
 
   C) 빠른 확인만 (수치는 최종값이 아님, 3~5분)
-     make run-fast
+     bash run.sh run-fast   (make 가 있으면 make run-fast)
 
-실행이 끝나면 반드시:
-     make finalize      # stderr 정리 + 개인정보 후스캔
+실행이 끝나면 반드시 (B·C 는 자동으로 수행한다):
+     bash run.sh finalize   (make 가 있으면 make finalize)   # stderr 정리 + 개인정보 후스캔
 
 결과 위치:
-     outputs/figures/                  그림 39장
-     outputs/tables/                   표 108개
-     outputs/predictions_test_336h.csv 제출용 예측결과
-     outputs/report_tbd_filled.md      보고서 채움표
+     outputs/figures/                   그림 39장
+     outputs/tables/                    표 114개
+     outputs/predictions_test_336h.csv  제출용 예측결과
+     outputs/report_tbd_filled.md       보고서 채움표
+     outputs/models/full/{eval,deploy}  모델 번들 (10.5절, git 제외)
 """
 
 print("=" * 66)

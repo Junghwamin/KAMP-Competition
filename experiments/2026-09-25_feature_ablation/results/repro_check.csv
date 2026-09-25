@@ -1,0 +1,13 @@
+﻿항목,이번 실행,커밋된 FULL,일치
+기준 OOF MAE,11.006654,11.0067,True
+기준 Peak-MAE,23.872763,23.8728,True
+기준 Recall,0.846154,0.8462,True
+기준 fold 표준편차,8.460604,8.4606,True
+Ablation 과거 전력 지연변수 MAE,7.875745,7.876,True
+Ablation 과거 전력 지연변수 Recall,0.858974,0.859,True
+Ablation 생산량·공장인원 MAE,12.183439,12.183,True
+Ablation 생산량·공장인원 Recall,0.846154,0.8462,True
+Ablation 공정상태 변수 MAE,11.15787,11.158,True
+Ablation 공정상태 변수 Recall,0.814103,0.8141,True
+Ablation 기상정보 MAE,10.985441,10.985,True
+Ablation 기상정보 Recall,0.852564,0.8526,True

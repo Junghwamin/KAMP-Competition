@@ -1,7 +1,7 @@
 """6장 — 성능평가 및 최종모델 선정 테스트.
 
 FAST 모드에서는 절대 성능값이 달라지므로 **구조와 논리 일관성**을 검증한다.
-특히 보고서 서술이 실측과 어긋나지 않는지(6.6절 교정)를 확인한다.
+특히 보고서 서술이 실측과 어긋나지 않는지(6.7절 교정)를 확인한다.
 """
 from __future__ import annotations
 
@@ -194,7 +194,95 @@ def test_regime_family_stays_on_top_in_d2(s06):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 6.6 결과 해석 — 보고서 서술 교정
+# 6.6 변수 제거 결과 검증 — 지연변수 제거 효과의 분해
+# ══════════════════════════════════════════════════════════════════════
+def test_frame_argument_defaults_to_feat(s06):
+    """frame 인자를 주지 않으면 기존과 같은 데이터가 나온다(추가형 변경)."""
+    a = s06.get_fold_data(3, "D1")
+    b = s06.get_fold_data(3, "D1", frame=s06.feat)
+    for x, y in zip(a[:4], b[:4]):
+        pd.testing.assert_frame_equal(x, y)
+
+
+def test_lag_variants_cover_the_plan(s06):
+    """피처군 6개, 지연 세분 3개, 조합, 휴무 인지형 2종, 잡음 기준선 5회가 모두 있다."""
+    ids = set(s06.lag_variant_tbl["ID"])
+    assert {"A", "L24", "L48", "L168", "B+W", "SA-all", "SA-168"} <= ids
+    assert sum(i.startswith("G-") for i in ids) == len(s06.FEATURE_GROUPS)
+    assert sum(i.startswith("NULL-") for i in ids) == len(s06.LAG_NOISE_SEEDS)
+
+
+def test_lag_base_is_final_model_oof(s06):
+    """기준 행은 최종모델 교차검증 결과를 그대로 쓴다(재학습 없음)."""
+    a = s06.lag_variant_tbl.set_index("ID").loc["A"]
+    oof = s06.cv_results[s06.FINAL_MODEL_NAME]["oof"]
+    assert abs(a["OOF MAE"] - s06.mae(oof["y_avg"], oof["pred_avg"])) < 1e-12
+
+
+def test_lag_group_removal_matches_ablation(s06):
+    """6.6절 피처군 제거는 6.3절 Ablation 과 같은 값을 낸다(같은 코드 경로)."""
+    ref = s06.lag_variant_tbl.set_index("ID")
+    abl = s06.ablation_tbl.set_index("제거 피처군")
+    pairs = {"G-과거전력": "과거 전력 지연변수", "G-생산정보": "생산량·공장인원",
+             "G-공정상태": "공정상태 변수", "G-기상정보": "기상정보"}
+    for vid, label in pairs.items():
+        assert abs(ref.loc[vid, "OOF MAE"] - abl.loc[label, "MAE"]) < 6e-4, vid
+
+
+def test_status_matched_lag_references_past_same_status_day(s06):
+    """휴무 인지형 지연값은 원점 이전의, 대상일과 같은 가동 상태인 날의 같은 시각 값이다."""
+    f = s06.feat
+    st = s06.operating_calendar["is_shutdown"]
+    vals, walked = s06.status_matched_lag(f, "y_avg", 24, 1, 14)
+    moved = np.where(walked > 0)[0]
+    assert len(moved) > 0
+    for i in moved[:: max(1, len(moved) // 150)]:
+        t = f.index[i]
+        ref = t - pd.Timedelta(hours=24) - pd.Timedelta(days=int(walked[i]))
+        assert ref < t.normalize()
+        assert bool(st[ref.normalize()]) == bool(st[t.normalize()])
+        assert np.isclose(vals[i], f["y_avg"].get(ref), equal_nan=True)
+
+
+def test_lag_criteria_and_noise_band(s06):
+    """잡음 폭은 양수이고, 판단 기준 열이 모두 있다."""
+    assert s06.LAG_NOISE_MAE > 0 and s06.LAG_NOISE_PEAK >= 0
+    cols = set(s06.lag_variant_tbl.columns)
+    for c in ("① CI가 0 미포함", "② 정상 fold 악화 ≤ 잡음", "③ 정상일 악화 ≤ 잡음", "④ Recall·Peak-MAE", "①~④ 통과"):
+        assert c in cols, c
+
+
+def test_lag_decomposition_and_top_days(s06):
+    """보고서 표 2-6 행과 오차 상위 2일이 만들어진다."""
+    assert len(s06.lag_decomp_tbl) == len(s06.LAG_DECOMP_IDS)
+    assert len(s06.LAG_TOP_DAYS) == 2
+    assert 0 < s06.LAG_TOP_SHARE < 1
+
+
+def test_lag_d2_starts_with_base(s06):
+    d2 = s06.lag_d2_tbl
+    assert d2.iloc[0]["ID"] == "A" and set(d2["조건"]) == {"D2"}
+    assert set(s06.LAG_D2_FIXED) <= set(d2["ID"])
+
+
+def test_lofo_only_in_full_mode(s06):
+    """개별 변수 제거 44회는 본실행에서만 돈다."""
+    expected = 0 if s06.FAST else len(s06.FEATURE_COLS)
+    assert len(s06.lofo_tbl) == expected
+
+
+def test_gate_diagnosis_for_regime_model(s06):
+    """레짐 모델이면 오차 상위 4일의 게이트 배정이 기록된다."""
+    if "레짐" not in s06.FINAL_MODEL_NAME:
+        pytest.skip("레짐 모델이 아님")
+    g = s06.gate_diag_tbl
+    assert len(g) == 4
+    assert (g["게이트 휴무일 변수 분기 수"] >= 0).all()
+    assert g["08~17시 배정 레짐"].str.len().gt(0).all()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 6.7 결과 해석 — 보고서 서술 교정
 # ══════════════════════════════════════════════════════════════════════
 def test_interpretation_table_exists(s06):
     """실측과 어긋나는 서술을 교정하는 표가 생성된다."""

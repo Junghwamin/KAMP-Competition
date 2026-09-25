@@ -2,7 +2,7 @@
 
 왜 별도 단계인가
 ----------------
-노트북 안(10.5절)의 개인정보 스캔은 **자기 실행 출력을 볼 수 없다.**
+노트북 안(10.6절)의 개인정보 스캔은 **자기 실행 출력을 볼 수 없다.**
 `nbconvert --execute --inplace` 는 모든 셀이 끝난 **뒤에** 파일을 쓰므로,
 스캔 셀이 읽는 파일은 아직 출력이 비어 있는 빌드 직후 버전이다.
 
@@ -20,9 +20,12 @@
 `output_type == "error"` 로 남는다. stderr 경고만 지우는 것은
 오류를 감추지 않는다(오류가 있으면 아래 검사에서 잡아낸다).
 
+**게이트 강제**: 최종 게이트(`outputs/tables/gate6_final.csv`)는 노트북 안에서 예외를
+던지지 않고 표로만 남는다. 그래서 여기서 `통과` 가 전부 True 인지 다시 확인한다.
+
 사용법
 ------
-    python build/finalize_notebook.py
+    python tools/finalize_notebook.py
 """
 from __future__ import annotations
 
@@ -113,8 +116,9 @@ def scan(path: Path) -> list[dict]:
                 if re.search(pat, blob):
                     hits.append({"파일": path.name, "셀": i, "유형": label})
 
+    # .json = 모델 번들 매니페스트·자가검증 사례. 모델 텍스트(.lgb)는 경로·계정명이 없어 제외한다.
     for f in sorted(OUTPUT_DIR.rglob("*")):
-        if f.suffix.lower() not in (".md", ".csv", ".txt"):
+        if f.suffix.lower() not in (".md", ".csv", ".txt", ".json"):
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
         for label, pat in SCAN_PATTERNS.items():
@@ -134,6 +138,18 @@ def check_no_errors(path: Path) -> int:
     )
 
 
+def check_final_gate() -> list[str]:
+    """최종 게이트 표에서 미통과 항목을 돌려준다(표가 없으면 그 자체가 실패)."""
+    import csv
+
+    path = OUTPUT_DIR / "tables" / "gate6_final.csv"
+    if not path.exists():
+        return [f"{path.name} 없음"]
+    with path.open(encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    return [r["점검"] for r in rows if str(r.get("통과")).strip() != "True"]
+
+
 def main() -> int:
     if not NOTEBOOK.exists():
         print(f"[FAIL] 노트북이 없다: {NOTEBOOK.name}", file=sys.stderr)
@@ -149,6 +165,14 @@ def main() -> int:
         print(f"[FAIL] 실행 오류 출력 {n_err}건이 남아 있다 — 게이트 실패", file=sys.stderr)
         return 1
     print("  실행 오류: 0건")
+
+    failed_gate = check_final_gate()
+    if failed_gate:
+        print(f"[FAIL] 최종 게이트 미통과 {len(failed_gate)}건:", file=sys.stderr)
+        for item in failed_gate:
+            print(f"   - {item}", file=sys.stderr)
+        return 1
+    print("  최종 게이트: 전 항목 통과")
 
     hits = scan(NOTEBOOK)
     print(f"\n── 제출 전 개인정보 후스캔: {len(hits)}건 ──")

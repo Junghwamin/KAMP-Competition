@@ -26,7 +26,7 @@ tools/build_notebook.py        src → ipynb 조립 스크립트
 tests/                         단계별 검증 테스트
 outputs/
   figures/     그림 39장 + figure_index.csv (그림↔보고서 절 매핑)
-  tables/      표 108개 (보고서 표 원본)
+  tables/      표 114개 (보고서 표 원본)
   predictions_test_336h.csv    테스트 예측결과 (336행)
   report_tbd_filled.md         채움표 + 문장 치환사전 + 장별 PASS/FAIL
   report_ch4_draft.md / ch5 / ch6   4·5·6장 본문 초안

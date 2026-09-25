@@ -1,0 +1,15 @@
+        날짜  보정된 행(확정 시)  현행 예측 일평균  보정 예측 일평균(확정 시)  현행 peak_label 시간  보정 peak_label 시간(확정 시)  peak_label_cls 시간(보정 안 됨)                                               미확정 시 경고
+2021-09-01            6     42.001           21.506                 0                       0                          4 PLAN_ZERO_UNCONFIRMED / PLAN_ZERO_AFTER_OPERATING_WEEK
+2021-09-02            5     39.915           21.607                 0                       0                          0 PLAN_ZERO_UNCONFIRMED / PLAN_ZERO_AFTER_OPERATING_WEEK
+2021-09-03           10     59.750           21.783                 0                       0                          3 PLAN_ZERO_UNCONFIRMED / PLAN_ZERO_AFTER_OPERATING_WEEK
+2021-09-06           17    108.902           22.434                 8                       0                          8 PLAN_ZERO_UNCONFIRMED / PLAN_ZERO_AFTER_OPERATING_WEEK
+2021-09-07           24    131.331           22.548                 8                       0                          8 PLAN_ZERO_UNCONFIRMED / PLAN_ZERO_AFTER_OPERATING_WEEK
+2021-09-08           22    121.277           22.256                 6                       0                          0 PLAN_ZERO_UNCONFIRMED / PLAN_ZERO_AFTER_OPERATING_WEEK
+2021-09-09           24    134.809           22.068                 6                       0                          5 PLAN_ZERO_UNCONFIRMED / PLAN_ZERO_AFTER_OPERATING_WEEK
+2021-09-10           14     80.656           22.061                 1                       0                          1 PLAN_ZERO_UNCONFIRMED / PLAN_ZERO_AFTER_OPERATING_WEEK
+2021-09-13           17    107.481           22.418                 7                       0                          7 PLAN_ZERO_UNCONFIRMED / PLAN_ZERO_AFTER_OPERATING_WEEK
+2021-09-14           24    135.154           22.311                 8                       0                          7 PLAN_ZERO_UNCONFIRMED / PLAN_ZERO_AFTER_OPERATING_WEEK
+
+구현 일치 확인(일평균 10개): 현행 최대 차이 1.42e-14 kW · 보정 최대 차이 3.55e-15 kW
+추가 점검 통과: 실제 계획일 불변(경고) · 문자열 플래그 거부 · 공휴일 자동 확정 안 함
+교차 확인: 일치

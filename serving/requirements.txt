@@ -1,0 +1,24 @@
+# KAMP 서빙(추론 전용) 의존성 — 제출용 루트 requirements.txt 와 분리한다.
+#
+# - 번들 로더는 lightgbm·numpy·pandas 버전이 **학습 때와 정확히 같아야** 기동한다
+#   (pandas rolling 의 부동소수 경로·LightGBM 모델 형식이 버전에 따라 달라질 수 있다).
+#   그래서 이 세 개는 루트 requirements.txt 와 같은 버전으로 고정한다.
+# - scikit-learn·tensorflow·optuna 는 필요 없다(Isotonic 보정은 np.interp 로 동일하게 계산).
+# - 설치 후 `pip check` 가 깨끗해야 한다.
+#
+#   pip install -r serving/requirements.txt && pip check
+
+numpy==2.3.5
+pandas==3.0.5
+lightgbm==4.7.0
+
+# ── REST API ──────────────────────────────────────────────────────────
+fastapi==0.141.1
+starlette==0.52.1
+annotated-doc==0.0.5
+pydantic==2.12.5
+pydantic-core==2.41.5
+uvicorn==0.40.0
+
+# ── API 테스트(TestClient) ────────────────────────────────────────────
+httpx==0.28.1

@@ -10,3 +10,7 @@ requirements.txt 존재,True
 이중 축·freq='H' 0건,True
 제출 대상 개인정보 0건,True
 채움표 30항목 이상,True
+서비스 번들 2종 생성·sha256 무결성,True
+평가 번들 재로드 예측 == 메모리 예측(비트),True
+번들 예측 == 제출 파일 (최종모델=번들모델일 때),True
+재학습 경로 sha 재현 · 번들 JSON 경로·계정명 0건,True

@@ -800,7 +800,312 @@ print("── 게이트 5 ──")
 display(gate5)
 
 # %% [markdown]
-# ### 6.6 결과 해석 — 보고서 서술을 실측에 맞춘다
+# ### 6.6 변수 제거 결과 검증 — 지연변수 제거 효과의 분해
+#
+# - **목적**: 6.3절에서 과거 전력 지연변수를 빼자 OOF MAE 가 오히려 좋아졌다. 이것이 최종모델을
+#   바꿀 근거인지 **테스트를 보지 않고**, 결과를 보기 전에 정한 기준으로 판정한다.
+# - **보고서 대응절**: 2.8, 2.9, 3.5
+# - **산출물**: `ch2_lag_variants.csv`, `ch2_lag_decomposition.csv`, `ch2_lofo.csv`, `ch2_lag_d2.csv`, `ch2_gate_diagnosis.csv`
+#
+# **판단 기준 (먼저 고정)** — 변형이 아래를 모두 만족할 때만 최종모델 교체 후보로 본다.
+#
+# | 기준 | 내용 |
+# |---|---|
+# | ① | OOF MAE 개선의 일 단위 블록 부트스트랩 95% CI 가 0 을 포함하지 않는다 |
+# | ② | 휴가·재가동이 없는 fold 2·5 각각에서 악화 폭이 잡음 폭 이하 |
+# | ③ | 대상일과 7일 전의 가동 상태가 같은 날(정상일)에서 악화 폭이 잡음 폭 이하 |
+# | ④ | Recall 하락 0.01 이내, Peak-MAE 악화가 Peak-MAE 잡음 폭 이하 |
+# | ⑤ | 복제 제거 조건 D2 에서도 개선 방향이 같다 (①~④ 통과 변형과 주요 변형만 확인) |
+#
+# **잡음 폭** = 의미 없는 난수 변수 1개를 추가한 실행 5회의 |ΔMAE| 최댓값.
+# 이 LightGBM 설정은 결정적(bagging·열 샘플링 없음)이라 시드를 바꿔도 결과가 같으므로,
+# "아무 의미 없는 변화"가 MAE 를 얼마나 흔드는지를 이렇게 잰다.
+#
+# **변형** — 피처군 6개 제거, 지연 세분(24·48·168시간 각 2개), 지연+기상 동시 제거,
+# 휴무 인지형 지연변수(참조일의 가동 상태가 대상일과 다르면 같은 상태의 과거일 값으로 대체) 2종,
+# 잡음 기준선 5회, 44개 변수 개별 제거. 개별 제거는 44개를 동시에 비교하므로 우연히 기준을 넘는
+# 변수가 나올 수 있다. 빠른 확인 모드(`KAMP_FAST=1`)에서는 개별 제거를 생략한다.
+#
+# > 아래 "오차 상위 2일 제외"·"토요일" 분해는 판정 기준이 아니라 **원인을 설명하는 진단**이다.
+
+# %%
+LAG_NOISE_SEEDS = (1000, 1001, 1002, 1003, 1004)
+LAG_NORMAL_FOLDS = (2, 5)  # 하계휴가·재가동이 없는 fold
+LAG_D2_FIXED = ("G-과거전력", "L168", "B+W", "SA-all", "SA-168")
+LAG_DECOMP_IDS = ("A", "G-과거전력", "L48", "L168", "L24", "SA-all")
+
+
+def status_matched_lag(frame, col: str, lag_h: int, step_days: int, max_steps: int):
+    """참조일의 휴무 여부가 대상일과 다르면 step_days 씩 물러나 같은 상태의 날 같은 시각 값을 쓴다.
+
+    참조일은 항상 대상일 − lag_h 이전이라 원점(대상일 00:00) 기준 인과적이다.
+    끝까지 같은 상태의 날이 없으면 결측으로 둔다(LightGBM 이 결측을 처리한다).
+
+    Returns
+    -------
+    (numpy.ndarray, numpy.ndarray)
+        새 지연값, 물러난 횟수(0 = 원래 참조일 그대로, −1 = 찾지 못함).
+    """
+    status = operating_calendar["is_shutdown"].astype(int)
+    day = frame.index.normalize()
+    hour_td = pd.to_timedelta(frame.index.hour, unit="h")
+    tgt = status.reindex(day).fillna(-1).to_numpy()
+    y = frame[col]
+    out = np.full(len(frame), np.nan)
+    walked = np.full(len(frame), -1)
+    todo = np.ones(len(frame), bool)
+    ref = day - pd.Timedelta(hours=lag_h)
+    for step in range(max_steps + 1):
+        st = status.reindex(ref).fillna(-2).to_numpy()
+        hit = todo & (st == tgt)
+        vals = y.reindex(ref + hour_td).to_numpy()
+        out[hit] = vals[hit]
+        walked[hit] = step
+        todo &= ~hit
+        if not todo.any():
+            break
+        ref = ref - pd.Timedelta(days=step_days)
+    return out, walked
+
+
+def make_status_matched_frame(lags) -> pd.DataFrame:
+    """지연변수를 휴무 인지형으로 바꾼 피처 프레임.
+
+    24·48시간은 1일씩 최대 14일, 168시간은 같은 요일(7일)씩 최대 5주 물러난다.
+    물러나지 않은 행은 원래 지연값과 정확히 같아야 한다(구현 검증).
+    """
+    f = feat.copy()
+    for col in ("y_avg", "y_peak"):
+        for lag in lags:
+            step, max_steps = (7, 5) if lag == 168 else (1, 14)
+            vals, walked = status_matched_lag(f, col, lag, step, max_steps)
+            name = f"{col}_lag{lag}"
+            same = walked == 0
+            assert np.array_equal(vals[same], f[name].to_numpy()[same], equal_nan=True), name
+            f[name] = vals
+    return f
+
+
+def lag_day_flags(index) -> dict:
+    """진단용 구간 — 정상일(대상일과 7일 전의 가동 상태가 같음)과 토요일."""
+    day = index.normalize()
+    st = operating_calendar["is_shutdown"].astype(int)
+    s0 = st.reindex(day).to_numpy()
+    s7 = st.reindex(day - pd.Timedelta(days=7)).to_numpy()
+    return {"정상일": s0 == s7, "토요일": index.dayofweek == 5}
+
+
+def run_lag_variant(vid: str, desc: str, fit_fn=None, features=None, frame=None, cond: str = "D1") -> dict:
+    """최종모델과 같은 적합 함수로 변형 하나를 교차검증한다."""
+    res = run_cv(f"6.6-{vid}", fit_fn or MODEL_REGISTRY[FINAL_MODEL_NAME], cond, features=features, frame=frame)
+    res.update(vid=vid, desc=desc, n_feat=len(features) if features is not None else len(FEATURE_COLS))
+    return res
+
+
+def summarize_lag_variant(res: dict, base: dict | None, top_days) -> dict:
+    """변형 하나의 지표. base 가 있으면 기준 대비 차이(변형 − 기준)와 부트스트랩 CI 를 붙인다."""
+    oof = res["oof"]
+    y, p = oof["y_avg"].to_numpy(), oof["pred_avg"].to_numpy()
+    reg = regression_metrics(oof["y_avg"], oof["pred_avg"], THETA)
+    cls = classification_metrics(oof["y_cls"], (oof["pred_peak"] >= res["tau"]).astype(int), oof["pred_peak"])
+    fm = res["fold_metrics"].set_index("fold")["MAE"]
+    ae = np.abs(y - p)
+    flags = lag_day_flags(oof.index)
+    keep = ~oof.index.normalize().isin(top_days)
+    row = {
+        "ID": res["vid"], "변형": res["desc"], "조건": res["cond"], "피처수": res["n_feat"],
+        "OOF MAE": reg["MAE"], "Peak-MAE": reg["Peak-MAE"], "Recall": cls["Recall"], "F1": cls["F1"],
+        "FP": cls["FP"], "FN": cls["FN"], "fold 표준편차": float(fm.std()),
+        **{f"fold{f}": float(fm[f]) for f in ACTIVE_FOLDS},
+        "정상일 MAE": float(ae[flags["정상일"]].mean()),
+        "토요일 MAE": float(ae[flags["토요일"]].mean()),
+        "상위2일 제외 MAE": float(ae[keep].mean()),
+    }
+    if base is None:
+        return row
+    assert base["oof"].index.equals(oof.index), "변형 간 OOF 행이 달라 짝지은 비교가 불가능하다"
+    b = summarize_lag_variant(base, None, top_days)
+    for k in ("OOF MAE", "Peak-MAE", "Recall", "F1", "fold 표준편차", *[f"fold{f}" for f in ACTIVE_FOLDS],
+              "정상일 MAE", "토요일 MAE", "상위2일 제외 MAE"):
+        row[f"Δ{k}"] = row[k] - b[k]
+    # paired_bootstrap_mae 의 diff 는 MAE(기준) − MAE(변형) 이다 → 부호를 뒤집어 '변형 − 기준' 으로 적는다
+    bs = paired_bootstrap_mae(y, base["oof"]["pred_avg"].to_numpy(), p, index=oof.index)
+    row["ΔMAE CI 하한"], row["ΔMAE CI 상한"], row["p"] = -bs["ci_high"], -bs["ci_low"], bs["p_value"]
+    row["개선 fold 수"] = int(sum(row[f"Δfold{f}"] < 0 for f in ACTIVE_FOLDS))
+    return row
+
+
+def judge_lag_variants(tbl: pd.DataFrame, noise_mae: float, noise_peak: float) -> pd.DataFrame:
+    """판단 기준 ①~④ 를 적용한다(잡음 폭은 기준선 실행에서 구한 값)."""
+    out = tbl.copy()
+    out["① CI가 0 미포함"] = out["ΔMAE CI 상한"] < 0
+    out["② 정상 fold 악화 ≤ 잡음"] = np.logical_and.reduce(
+        [out[f"Δfold{f}"] <= noise_mae for f in LAG_NORMAL_FOLDS]
+    )
+    out["③ 정상일 악화 ≤ 잡음"] = out["Δ정상일 MAE"] <= noise_mae
+    out["④ Recall·Peak-MAE"] = (out["ΔRecall"] >= -0.01) & (out["ΔPeak-MAE"] <= noise_peak)
+    out["①~④ 통과"] = out[["① CI가 0 미포함", "② 정상 fold 악화 ≤ 잡음", "③ 정상일 악화 ≤ 잡음", "④ Recall·Peak-MAE"]].all(axis=1)
+    return out
+
+
+def diagnose_gate_days(days, base_oof: pd.DataFrame) -> pd.DataFrame:
+    """오차가 큰 날에 1단계 분류기가 어느 상태(레짐)를 배정했는지 직접 확인한다.
+
+    해당 날이 검증구간인 fold 를 같은 적합 함수로 다시 학습해 게이트 출력을 읽는다
+    (결정적 학습이라 교차검증 때의 게이트와 같다). 레짐 모델이 아니면 빈 표를 돌려준다.
+    """
+    rows = []
+    fit_fn = MODEL_REGISTRY[FINAL_MODEL_NAME]
+    for fold in sorted({int(base_oof.loc[base_oof.index.normalize() == d, "fold"].iloc[0]) for d in days}):
+        Xtr, ytr, Xva, yva, idx = get_fold_data(fold, "D1")
+        art = fit_fn(Xtr, ytr, Xva).get("_artifacts") or {}
+        if art.get("kind") != "regime":
+            return pd.DataFrame()
+        gate = art["gate"]
+        regime = pd.Series(gate.predict(Xva[art["gcols"]]), index=idx)
+        splits = pd.Series(gate.booster_.feature_importance("split"), index=gate.booster_.feature_name())
+        for d in days:
+            m = idx.normalize() == d
+            if not m.any():
+                continue
+            day_hours = regime[m]
+            work = day_hours[(day_hours.index.hour >= 8) & (day_hours.index.hour <= 17)]
+            dist = work.value_counts().sort_index()
+            on_day = base_oof.index.normalize() == d
+            rows.append({
+                "날짜": d.strftime("%Y-%m-%d"), "요일": "월화수목금토일"[d.dayofweek], "fold": fold,
+                "휴무일": bool(operating_calendar.loc[d, "is_shutdown"]),
+                "실측 일평균": float(base_oof.loc[on_day, "y_avg"].mean()),
+                "예측 일평균": float(base_oof.loc[on_day, "pred_avg"].mean()),
+                "08~17시 배정 레짐": " · ".join(f"{int(k)}:{int(v)}시간" for k, v in dist.items()),
+                "게이트 휴무일 변수 분기 수": int(splits.get("is_shutdown", 0)),
+            })
+    return pd.DataFrame(rows)
+
+
+# ── 실행 ──────────────────────────────────────────────────────────────
+_lag_t0 = time.perf_counter()
+_lag_base = {**cv_results[FINAL_MODEL_NAME], "vid": "A", "desc": "최종모델 (44개)", "n_feat": len(FEATURE_COLS)}
+_lag_oof = _lag_base["oof"]
+_lag_daily = (_lag_oof["y_avg"] - _lag_oof["pred_avg"]).abs().groupby(_lag_oof.index.normalize()).mean()
+LAG_TOP_DAYS = _lag_daily.nlargest(2).index
+_lag_ae = (_lag_oof["y_avg"] - _lag_oof["pred_avg"]).abs()
+LAG_TOP_SHARE = float(_lag_ae[_lag_oof.index.normalize().isin(LAG_TOP_DAYS)].sum() / _lag_ae.sum())
+
+_lag_is_regime = "레짐" in FINAL_MODEL_NAME
+_lag_n_cls = 3 if "3분류" in FINAL_MODEL_NAME else 2
+lag_runs: dict = {"A": _lag_base}
+for _g, _cols in FEATURE_GROUPS.items():
+    _keep = [c for c in FEATURE_COLS if c not in set(_cols)]
+    # 6.3절과 같이, 생산정보를 뺄 때는 1단계 분류기도 생산량 비의존으로 바꾼다
+    _fit = make_regime_model(_lag_n_cls, gate_features=_keep) if (_g == "생산정보" and _lag_is_regime) else None
+    lag_runs[f"G-{_g}"] = run_lag_variant(f"G-{_g}", f"{_g} {len(_cols)}개 제거", _fit, features=_keep)
+for _lag in (24, 48, 168):
+    _drop = {f"y_avg_lag{_lag}", f"y_peak_lag{_lag}"}
+    lag_runs[f"L{_lag}"] = run_lag_variant(
+        f"L{_lag}", f"{_lag}시간 전 2개 제거", features=[c for c in FEATURE_COLS if c not in _drop]
+    )
+_lag_drop_bw = set(FEATURE_GROUPS["과거전력"]) | set(FEATURE_GROUPS["기상정보"])
+lag_runs["B+W"] = run_lag_variant("B+W", "지연 6개 + 기상 6개 제거", features=[c for c in FEATURE_COLS if c not in _lag_drop_bw])
+LAG_SA_FRAMES = {"SA-all": make_status_matched_frame((24, 48, 168)), "SA-168": make_status_matched_frame((168,))}
+lag_runs["SA-all"] = run_lag_variant("SA-all", "휴무 인지형 지연변수 (6개 교체)", frame=LAG_SA_FRAMES["SA-all"])
+lag_runs["SA-168"] = run_lag_variant("SA-168", "휴무 인지형 지연변수 (168시간만 교체)", frame=LAG_SA_FRAMES["SA-168"])
+for _i, _seed in enumerate(LAG_NOISE_SEEDS):
+    _f = feat.copy()
+    _f["noise"] = np.random.default_rng(_seed).standard_normal(len(_f))
+    lag_runs[f"NULL-{_i}"] = run_lag_variant(
+        f"NULL-{_i}", f"잡음 변수 추가 (시드 {_seed})", features=[*FEATURE_COLS, "noise"], frame=_f
+    )
+if not FAST:
+    for _c in FEATURE_COLS:
+        lag_runs[f"LOFO-{_c}"] = run_lag_variant(
+            f"LOFO-{_c}", f"{FEATURE_LABELS.get(_c, _c)} 제거", features=[x for x in FEATURE_COLS if x != _c]
+        )
+
+_lag_rows = [summarize_lag_variant(r, None if k == "A" else _lag_base, LAG_TOP_DAYS) for k, r in lag_runs.items()]
+_lag_all = pd.DataFrame(_lag_rows)
+_lag_null = _lag_all[_lag_all["ID"].str.startswith("NULL-")]
+LAG_NOISE_MAE = float(_lag_null["ΔOOF MAE"].abs().max())
+LAG_NOISE_PEAK = float(_lag_null["ΔPeak-MAE"].abs().max())
+_lag_judged = judge_lag_variants(_lag_all[_lag_all["ID"] != "A"], LAG_NOISE_MAE, LAG_NOISE_PEAK)
+_lag_judged["구분"] = np.where(
+    _lag_judged["ID"].str.startswith("NULL-"), "잡음 기준선",
+    np.where(_lag_judged["ID"].str.startswith("LOFO-"), "개별 변수 제거", "변형"),
+)
+lag_variant_tbl = pd.concat([_lag_all[_lag_all["ID"] == "A"], _lag_judged[_lag_judged["구분"] != "개별 변수 제거"]])
+lofo_tbl = _lag_judged[_lag_judged["구분"] == "개별 변수 제거"].copy()
+if len(lofo_tbl):
+    lofo_tbl["잡음 초과 개선·3/4 fold"] = (lofo_tbl["ΔOOF MAE"] < -LAG_NOISE_MAE) & (lofo_tbl["개선 fold 수"] >= 3)
+LAG_N_VARIANTS = len(lag_runs)
+LAG_GROUP_PASS = int(_lag_judged[_lag_judged["ID"].str.startswith("G-")]["①~④ 통과"].sum())
+
+# ⑤ D2 — 주요 변형 + ①~④ 통과 변형(개별 제거 포함)
+_lag_d2_ids = list(dict.fromkeys([*LAG_D2_FIXED, *_lag_judged.loc[_lag_judged["①~④ 통과"], "ID"]]))
+_lag_d2_ids = [v for v in _lag_d2_ids if not v.startswith("NULL-")]
+_lag_d2_base = run_lag_variant("A", "최종모델 (44개)", cond="D2")
+_lag_d2_rows = [summarize_lag_variant(_lag_d2_base, None, LAG_TOP_DAYS)]
+for _v in _lag_d2_ids:
+    _r = lag_runs[_v]
+    if _v.startswith("G-"):
+        _g = _v[2:]
+        _keep = [c for c in FEATURE_COLS if c not in set(FEATURE_GROUPS[_g])]
+        _fit = make_regime_model(_lag_n_cls, gate_features=_keep) if (_g == "생산정보" and _lag_is_regime) else None
+        _d2 = run_lag_variant(_v, _r["desc"], _fit, features=_keep, cond="D2")
+    elif _v in LAG_SA_FRAMES:
+        _d2 = run_lag_variant(_v, _r["desc"], frame=LAG_SA_FRAMES[_v], cond="D2")
+    elif _v == "B+W":
+        _d2 = run_lag_variant(_v, _r["desc"], features=[c for c in FEATURE_COLS if c not in _lag_drop_bw], cond="D2")
+    elif _v.startswith("L") and _v[1:].isdigit():
+        _drop = {f"y_avg_lag{_v[1:]}", f"y_peak_lag{_v[1:]}"}
+        _d2 = run_lag_variant(_v, _r["desc"], features=[c for c in FEATURE_COLS if c not in _drop], cond="D2")
+    else:  # LOFO-
+        _c = _v[len("LOFO-"):]
+        _d2 = run_lag_variant(_v, _r["desc"], features=[x for x in FEATURE_COLS if x != _c], cond="D2")
+    _lag_d2_rows.append(summarize_lag_variant(_d2, _lag_d2_base, LAG_TOP_DAYS))
+lag_d2_tbl = pd.DataFrame(_lag_d2_rows)
+lag_d2_tbl["⑤ D2 개선 방향 유지"] = lag_d2_tbl.get("ΔOOF MAE", pd.Series(np.nan, index=lag_d2_tbl.index)) < 0
+
+# 보고서 2.8절 표 — 지연변수 계열만 추린 분해
+_lag_ref = lag_variant_tbl.set_index("ID")
+lag_decomp_tbl = pd.DataFrame([
+    {
+        "변형": _lag_ref.loc[v, "변형"],
+        "OOF MAE": _lag_ref.loc[v, "OOF MAE"],
+        "상위2일 제외 MAE": _lag_ref.loc[v, "상위2일 제외 MAE"],
+        "Δ상위2일 제외": _lag_ref.loc[v, "Δ상위2일 제외 MAE"] if v != "A" else 0.0,
+        "토요일 MAE": _lag_ref.loc[v, "토요일 MAE"],
+        "Δ토요일": _lag_ref.loc[v, "Δ토요일 MAE"] if v != "A" else 0.0,
+        "ΔRecall": _lag_ref.loc[v, "ΔRecall"] if v != "A" else 0.0,
+        "①~④ 통과": bool(_lag_ref.loc[v, "①~④ 통과"]) if v != "A" else None,
+    }
+    for v in LAG_DECOMP_IDS
+])
+gate_diag_tbl = diagnose_gate_days(list(_lag_daily.nlargest(4).index), _lag_oof)
+
+save_table(lag_variant_tbl.round(6), "ch2_lag_variants")
+save_table(lag_decomp_tbl.round(6), "ch2_lag_decomposition")
+save_table(lofo_tbl.round(6), "ch2_lofo")
+save_table(lag_d2_tbl.round(6), "ch2_lag_d2")
+save_table(gate_diag_tbl, "ch2_gate_diagnosis")
+
+print(f"── 6.6절 지연변수 제거 효과 분해 (변형 {LAG_N_VARIANTS}개 + D2 {len(lag_d2_tbl)}개, "
+      f"{time.perf_counter() - _lag_t0:.0f}초) ──")
+print(f"  최종모델 오차 상위 2일 = {', '.join(d.strftime('%m-%d') for d in LAG_TOP_DAYS)} "
+      f"(OOF 절대오차의 {LAG_TOP_SHARE:.1%})")
+print(f"  잡음 폭: MAE {LAG_NOISE_MAE:.3f} kW / Peak-MAE {LAG_NOISE_PEAK:.3f} kW")
+print(f"  ①~④ 를 통과한 피처군 제거 변형: {LAG_GROUP_PASS}개")
+display(lag_decomp_tbl.round(3))
+if len(lofo_tbl):
+    print("\n── 개별 변수 제거 — 개선 폭 상위 5 ──")
+    display(lofo_tbl.nsmallest(5, "ΔOOF MAE")[["변형", "ΔOOF MAE", "ΔMAE CI 하한", "ΔMAE CI 상한", "개선 fold 수", "①~④ 통과"]].round(3))
+print("\n── D2 강건성 ──")
+display(lag_d2_tbl[["ID", "OOF MAE", *[c for c in ("ΔOOF MAE", "ΔMAE CI 하한", "ΔMAE CI 상한") if c in lag_d2_tbl]]].round(3))
+if len(gate_diag_tbl):
+    print("\n── 오차 상위 날짜의 1단계 분류(게이트) 배정 ──")
+    display(gate_diag_tbl)
+
+# %% [markdown]
+# ### 6.7 결과 해석 — 보고서 서술을 실측에 맞춘다
 #
 # - **목적**: 유의성 검정 결과와 Ablation 결과가 보고서 초안의 서술과 어긋나는 지점을
 #   찾아 **서술을 실측에 맞게 교정**한다.
@@ -845,14 +1150,19 @@ def interpret_results() -> pd.DataFrame:
     if len(lag_row):
         d = float(lag_row["MAE 변화"].iloc[0])
         if d < 0:
+            # 6.6절 분해 결과로 원인을 적는다(추정이 아니라 측정)
+            g = lag_variant_tbl.set_index("ID").loc["G-과거전력"]
+            base_row = lag_variant_tbl.set_index("ID").loc["A"]
+            days = "·".join(f"{x.month}/{x.day}" for x in LAG_TOP_DAYS)
+            dx = float(g["Δ상위2일 제외 MAE"])
             narrative = (
-                f"과거 전력 지연변수를 제거하면 OOF MAE가 {d:+.3f} kW **개선**된다. "
-                "OOF 구간(07-07~08-31)에 하계휴가 07-31~08-08과 재가동이 포함되어 "
-                "`lag168`의 참조 시각이 휴무일이 되기 때문이다(예: 08-09 10시 실측 182 vs lag168 참조 22). "
-                "즉 이 데이터에서 지연변수는 **정상 가동 구간에서는 유용하지만 "
-                "휴무 전후에서는 해롭다**. 보고서 2.8절 '일·주 반복패턴의 기여'를 "
-                "'정상 가동 구간에 한정된 기여'로 수정하고, 향후 개선방향으로 "
-                "**휴무 인지형 지연변수**(휴무일을 건너뛴 lag)를 제시한다."
+                f"과거 전력 지연변수를 제거하면 OOF MAE가 {d:+.3f} kW **개선**되지만, 6.6절 분해에서 이 개선은 "
+                f"최종모델 오차 상위 2일({days}, OOF 절대오차의 {LAG_TOP_SHARE:.0%})에서 1단계 분류기가 "
+                "계획상 휴무일을 가동 상태로 보낸 오분류가 사라진 효과로 확인된다. "
+                f"두 날을 제외하면 제거 변형이 {dx:+.3f} kW {'나쁘고' if dx > 0 else '좋고'}, "
+                f"토요일 MAE가 {base_row['토요일 MAE']:.2f} → {g['토요일 MAE']:.2f}로 변한다. "
+                f"테스트를 보지 않고 미리 정한 기준 ①~④를 통과한 피처군 제거 변형은 {LAG_GROUP_PASS}개이므로 "
+                "44개 피처를 유지한다. 개선 대상은 변수가 아니라 **1단계 분류기의 휴무 판정**이다."
             )
         else:
             narrative = f"과거 전력 지연변수 제거 시 MAE가 {d:+.3f} kW 악화되어 기여가 확인된다."
@@ -904,7 +1214,7 @@ save_table(interpretation_tbl, "ch6_interpretation")
 MAE_IMPROVEMENT_SIGNIFICANT = bool(
     significance_tbl[significance_tbl["모델"] == FINAL_MODEL_NAME]["유의"].iloc[0]
 )
-print("── 6.6절 결과 해석 (보고서 서술 교정) ──")
+print("── 6.7절 결과 해석 (보고서 서술 교정) ──")
 for _, r in interpretation_tbl.iterrows():
     print(f"\n  [{r['항목']}] {r['실측']}")
     print(f"    → {r['보고서 서술 교정']}")

@@ -1,0 +1,15 @@
+{
+ "chosen": null,
+ "passed": [],
+ "noise_mae": 0.2,
+ "noise_peak": 0.962,
+ "r_changed_rows_oof": 49,
+ "ref_shutdown_kw": 21.541666666666668,
+ "gate_splits_is_shutdown_full_fit": {
+  "A": 269,
+  "R": 269,
+  "G": 625,
+  "RG": 625
+ },
+ "total_sec": 195.0
+}

@@ -10,5 +10,16 @@ jupytext==1.19.1
 # 노트북 배치 실행 + 마감  (tools/finalize_notebook.py)
 nbconvert==7.16.6
 
-# 단계별 검증 테스트 236개
+# 단계별 검증 테스트 427개 (서빙·번들 181개 포함)
 pytest==9.0.2
+
+# 서빙 API 테스트(test_serving_api)용 — serving/requirements.txt 와 같은 버전.
+# `-r serving/requirements.txt` 로 참조하지 않는다: serving/ 이 없는 환경(노트북만 받은 경우)에서
+# 셋업(set -e)이 멈추기 때문이다. 없으면 서빙 테스트는 skip 된다.
+fastapi==0.141.1
+starlette==0.52.1
+annotated-doc==0.0.5
+pydantic==2.12.5
+pydantic-core==2.41.5
+uvicorn==0.40.0
+httpx==0.28.1

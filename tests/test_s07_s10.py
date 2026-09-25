@@ -376,8 +376,12 @@ def test_requirements_pinned_exactly(s10, project_root):
 
 
 def test_readme_covers_chapter6_requirements(s10, project_root):
-    """README(=6장 본문)가 실행절차·환경·구성·재현성을 모두 담는다."""
-    text = (project_root / "README.md").read_text(encoding="utf-8")
+    """6장 본문 초안이 실행절차·환경·구성·재현성을 모두 담는다.
+
+    s10 은 루트 README.md 를 쓰지 않는다(사람이 관리하는 00_README.md 를 덮어쓰지 않도록).
+    README 형식 본문은 `outputs/report_ch6_draft.md` 로만 저장된다.
+    """
+    text = (project_root / "outputs" / "report_ch6_draft.md").read_text(encoding="utf-8")
     for kw in ("실행 방법", "파일 구성", "재현성", "게이트", "requirements.txt"):
         assert kw in text, kw
 

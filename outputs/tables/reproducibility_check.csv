@@ -15,3 +15,9 @@ ch5_calibration,True,,6,0.0,-
 ch5_uncertainty,True,,15,0.0,-
 ch1_theta,True,,10,0.0,-
 ch3_folds,True,,50,0.0,-
+ch6_model_bundles,True,,256,0.0,-
+ch2_lag_variants,True,,720,0.0,-
+ch2_lag_decomposition,True,,48,0.0,-
+ch2_lofo,True,,0,0.0,-
+ch2_lag_d2,True,,210,0.0,-
+ch2_gate_diagnosis,True,,32,0.0,-

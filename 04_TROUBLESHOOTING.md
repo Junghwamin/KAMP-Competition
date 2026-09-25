@@ -48,7 +48,7 @@ lightgbm 이 import 단계에서 깨집니다.
 
 **왜 3.0.5 를 고집하나**: 무음 실패 탐지가 pandas 3.x 의 Copy-on-Write 동작에 의존합니다.
 가이드북 베이스라인의 연쇄 대입(`df['col'][mask] = 1`)을 `ChainedAssignmentError` 로
-승격시켜 잡는데, 2.x 에서는 조용히 넘어갑니다. 또한 재현성 검증(722개 셀 일치)이
+승격시켜 잡는데, 2.x 에서는 조용히 넘어갑니다. 또한 재현성 검증(1,988개 셀 일치)이
 이 조합에서 이뤄졌습니다.
 
 ---
@@ -154,12 +154,13 @@ FULL 과 FAST 의 차이:
 
 ## 7. 디스크가 부족하다
 
-TensorFlow wheel 이 큽니다(약 600MB). `outputs/` 재생성은 약 10MB 입니다.
+TensorFlow wheel 이 큽니다(약 600MB). `outputs/` 재생성은 약 60MB 입니다
+(모델 번들 약 51MB 포함, 테스트를 돌리면 `outputs/models/fast/` 번들이 추가).
 
 ```bash
 df -h .
 python -m pip cache purge       # pip 캐시 정리
-rm -rf outputs/figures outputs/tables   # 산출물만 삭제 (data/·src/ 는 보존)
+rm -rf outputs/figures outputs/tables outputs/models   # 산출물만 삭제 (data/·src/ 는 보존)
 ```
 
 ---
@@ -167,7 +168,7 @@ rm -rf outputs/figures outputs/tables   # 산출물만 삭제 (data/·src/ 는 �
 ## 8. 테스트가 실패한다
 
 ```bash
-bash run.sh test                # 236개 통과가 정상
+bash run.sh test                # 427개 통과가 정상
 ```
 
 몇 가지 정상적인 경우:
@@ -175,6 +176,11 @@ bash run.sh test                # 236개 통과가 정상
 - **1개 skipped** — 플레이스홀더 테스트입니다. 정상입니다.
 - **1개 deselected** — `-m "not slow"` 로 제외한 Optuna 재탐색 테스트입니다.
   전부 돌리려면: `python -m pytest tests/ -q` (몇 분 더 걸림)
+- **`test_serving_api.py` 가 1 skipped** — fastapi·httpx 가 없으면 이 모듈(27개)이 통째로 건너뛰어져 요약에 `400 passed, 2 skipped` 로 나옵니다. `pip install -r requirements-dev.txt` 후 다시 실행하세요.
+- **서빙 테스트 5개 모듈이 skipped** — `serving/` 폴더가 없는 환경(노트북·데이터만 받은 경우)입니다. 정상입니다.
+  서빙 테스트는 `serving/` 폴더를 함께 받은 경우에만 돕니다(패키지를 설치해도 폴더가 없으면 계속 건너뜁니다).
+
+> ⚠️ `bash run.sh test` 는 `outputs/` 를 **FAST 결과로 덮어씁니다**. 테스트 뒤에는 `bash run.sh run`(FULL)을 다시 돌리세요.
 
 실제로 실패한다면:
 
@@ -196,10 +202,20 @@ python -m pytest tests/ -q -m "not slow" --tb=short 2>&1 | head -40
 ```bash
 # 올바른 순서
 vim src/s05_models.py        # 원본을 고친다
-bash run.sh build            # 노트북 재조립 (159셀)
-bash run.sh test             # 검증
+bash run.sh build            # 노트북 재조립 (164셀) + serving/_core.py 재생성 — 실행 출력이 지워진다
+bash run.sh test             # 검증 (⚠️ outputs/ 를 FAST 로 덮어씀 → 다음 줄에서 FULL 로 복구)
 bash run.sh run              # 실행 (finalize 자동)
+bash run.sh verify-head      # 커밋된 결과와 비교 (수치 변화 0 확인, 재실행 없음)
 ```
+
+---
+
+### 실험 스크립트를 돌렸더니 `outputs/` 의 표·그림 색인이 바뀌었다
+
+`experiments/` 의 스크립트를 저장소 폴더에서 파이프라인을 import 하도록 고치면 이렇게 된다.
+import 하는 순간 작업 디렉터리의 `outputs/` 에 표를 쓰고, `figure_index.csv` 를 그 시점까지의 그림만으로 다시 쓴다.
+기존 스크립트처럼 각 실험 폴더의 `_work/` 로 chdir 한 뒤 import 해야 한다.
+이미 바뀌었으면 `git checkout -- outputs/` 로 되돌리거나 FULL 을 다시 돌린다.
 
 ---
 
@@ -209,7 +225,7 @@ bash run.sh run              # 실행 (finalize 자동)
 bash run.sh finalize
 ```
 
-이 단계가 **필수**입니다. 노트북 안(10.5절)의 스캔은 `nbconvert --inplace` 특성상
+이 단계가 **필수**입니다. 노트북 안(10.6절)의 스캔은 `nbconvert --inplace` 특성상
 **자기 실행 출력을 볼 수 없습니다** — 모든 셀이 끝난 뒤에 파일이 쓰이기 때문입니다.
 서드파티 경고가 stderr 로 내보내는 메시지에 설치 경로(사용자명 포함)가 박히는데,
 블라인드 평가에서는 위반입니다.
@@ -218,6 +234,37 @@ bash run.sh finalize
 0건이 아니면 어느 파일·셀인지 알려줍니다.
 
 `_dev_docs/` 에는 개발 이력과 사용자명이 들어 있습니다. **제출 zip 에서 제외하세요.**
+
+finalize 는 **최종 게이트**(`outputs/tables/gate6_final.csv`)가 전부 통과인지도 확인합니다.
+노트북 안의 최종 게이트는 표로만 남고 예외를 던지지 않기 때문입니다. 스캔 대상은
+`outputs/` 아래 `.md`·`.csv`·`.txt`·`.json`(모델 번들 매니페스트 포함)입니다.
+
+> `outputs/` 안에서 셸 작업 디렉터리를 옮겨 개발 도구를 돌리면, 도구가 남긴 상태 파일
+> (`.omc/state/*.json` 등)에 절대경로가 찍혀 스캔에 걸릴 수 있습니다. 그런 파일은 지우면 됩니다.
+
+---
+
+## 11. 모델 번들·서빙이 실패한다
+
+노트북 10.5절은 번들을 저장한 뒤 **바로 다시 읽어 검증**하고, 어긋나면 `AssertionError` 로 멈춥니다.
+
+| 증상 | 원인과 대처 |
+|---|---|
+| `모델 번들 검증 실패: ['eval_bitwise']` | 디스크에서 다시 읽은 예측이 메모리 예측과 다르다. 저장 도중 파일이 바뀌었거나 라이브러리가 섞였다. `pip check` 후 다시 실행 |
+| `... ['refit_sha']` | 같은 데이터로 재적합한 모델 텍스트가 다르다 = 결정성이 깨졌다. `LGB_BASE`(deterministic·num_threads=4)가 바뀌지 않았는지 확인 |
+| `... ['manifest_clean']` | 번들 JSON 에 절대경로·계정명이 들어갔다. 매니페스트에 경로를 넣는 코드를 고친다 |
+| 급한 제출 직전인데 번들 절만 실패한다 | `KAMP_SKIP_BUNDLE=1 bash run.sh run` 으로 번들 절을 건너뛸 수 있다. **최종 게이트는 미통과로 남는다**(의도된 동작) |
+
+서빙(`python -m serving ...`, API) 오류 코드는 [`serving/README.md`](serving/README.md) §6 에 있습니다.
+자주 만나는 것:
+
+| 코드 | 대처 |
+|---|---|
+| `FAST_BUNDLE` | `outputs/models/fast/` 는 테스트 산출물이다. FULL 실행(`bash run.sh run`)이 만든 `full/` 번들을 쓴다 |
+| `VERSION_MISMATCH` | `pip install -r serving/requirements.txt` — lightgbm·numpy·pandas 가 학습 때와 같아야 한다 |
+| `BUNDLE_INTEGRITY` | 번들 파일이 손상·변조됐다. 노트북이 만든 원본을 다시 복사한다 |
+| `CALENDAR_NOT_COVERED` | 대상일 연도의 공휴일이 없다. `serving/config/holidays_kr.json` 에 공식 확인한 날짜와 연도를 추가 |
+| `HISTORY_TOO_SHORT` · `SHUTDOWN_RUN_TRUNCATED` | 이력을 더 길게(권장 14일, 휴무가 길면 그 이상) 보낸다. 오류의 `required_start` 를 참고 |
 
 ---
 

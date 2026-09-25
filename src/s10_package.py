@@ -22,9 +22,21 @@ from s01_diagnose import (  # noqa: F401
     df,
     operating_calendar,
 )
-from s02_features import FEATURE_COLS, N_WARMUP  # noqa: F401
-from s03_split import ACTIVE_FOLDS, CALENDAR_RULE_FP, calendar_rule_metrics  # noqa: F401
-from s05_models import HPO_N_TRIALS, cv_results, test_results  # noqa: F401
+from s00_env import DATA_PATH, MODEL_DIR  # noqa: F401
+from s01_diagnose import df_raw  # noqa: F401
+from s02_features import FEATURE_COLS, HOLIDAYS_2021, N_WARMUP, SAFE_LAGS, feat  # noqa: F401
+from s03_split import ACTIVE_FOLDS, CALENDAR_RULE_FP, calendar_rule_metrics, tune_tau, usable_mask  # noqa: F401
+from s05_models import (  # noqa: F401
+    HPO_N_TRIALS,
+    LGB_BASE,
+    MODEL_REGISTRY,
+    N_ESTIMATORS,
+    _calib,
+    _unc,
+    cv_results,
+    fit_interval_models,
+    test_results,
+)
 from s06_eval import (  # noqa: F401
     BEST_BASELINE_MAE,
     BEST_BASELINE_NAME,
@@ -586,10 +598,594 @@ _readme = write_readme()
     "# 제 6 장. 코드 구성 및 재현성 〔10점〕\n\n" + _readme.split("# 제조 생산데이터")[-1].split("\n", 1)[1],
     encoding="utf-8",
 )
-print(f"── README.md ({len(_readme):,}자) · report_ch6_draft.md 생성 완료 ──")
+print(f"── report_ch6_draft.md 생성 완료 (6장 본문 {len(_readme):,}자, 루트 README 는 쓰지 않음) ──")
 
 # %% [markdown]
-# ### 10.5 발표자료 골격 · 개인정보 스캔
+# ### 10.5 모델 저장 — 서비스 번들 (평가 · 배포)
+#
+# - **목적**: 학습된 모델을 파일로 저장해, 실서비스(매일 24:00 익일 24시간 예측)에서
+#   **학습 시점과 비트 단위로 같은 예측**을 재현할 수 있게 한다.
+# - **보고서 대응절**: 6장 (코드 구성 및 재현성)
+# - **산출물**: `outputs/models/{full|fast}/{eval|deploy}/`, `ch6_model_bundles.csv`
+#
+# | 번들 | 학습 구간 | 용도 |
+# |---|---|---|
+# | `eval` | 2021-01-08 ~ 08-31 (테스트 이전) | 제출 예측을 만든 **바로 그 모델**. 재로드 예측이 제출 파일과 비트 단위로 같은지 검증 |
+# | `deploy` | 2021-01-08 ~ 09-14 (전 구간) | 배포용 재학습. **보고서의 어떤 수치에도 쓰지 않는다** |
+#
+# 번들 구성: 최종모델(2단계 레짐 3분류 — 게이트 + 레짐별 회귀 + fallback) · 피크 직접분류기 ·
+# Isotonic 보정기 · 예측구간(분위 q10/q50/q90, 최종모델 OOF 잔차 기반 구간) · τ·θ·피처 계약.
+#
+# **저장 형식을 이렇게 정한 이유**
+#
+# | 결정 | 근거 |
+# |---|---|
+# | pickle 을 쓰지 않는다 | 레짐 모델의 예측 함수가 클로저라 pickle 자체가 불가하다. 노트북에서 정의한 객체는 `__main__` 에 묶여 서비스에서 로드할 수도 없다 |
+# | LightGBM 네이티브 텍스트 + JSON 매니페스트 | 라이브러리 표준 형식이고, 결정적 설정에서 재적합하면 **바이트까지 같다** → sha256 로 재현성을 증명한다 |
+# | 바이트로 읽고 sha256 대조 후 `model_str` 로 연다 | `Booster(model_file=...)` 는 한글이 든 절대경로를 열지 못한다 |
+# | 예측 직전 컬럼 재정렬 + float64 통일 | LightGBM 은 컬럼 순서가 바뀌어도 **오류 없이 틀린 값**을 낸다. 입력은 float64 로 통일한다(float32 로 한 번 내려간 값은 정밀도가 손실돼 예측이 달라진다) |
+# | 매니페스트도 해시한다 | τ·구간 반폭은 매니페스트 안에만 있다. 파일 sha 만으로는 매니페스트 변조를 못 잡으므로 `manifest_sha256` 을 두고 `bundle_id` 가 그 앞 12자리다 |
+# | 하이퍼파라미터는 dict → JSON | 모델 텍스트의 파라미터는 6자리로 반올림돼 재학습 레시피로 쓸 수 없다 |
+# | FAST 번들은 `fast/` 에 분리 | 테스트 실행이 FULL 번들을 덮어쓰지 못하게 한다. 서빙 로더는 FAST 번들을 거부한다 |
+#
+# 배포 번들의 τ·τ_cls·보정기·예측구간 반폭은 교차검증 산출물이라 재학습 구간에서 다시 만들 수 없다.
+# 그래서 평가 번들 값을 **묶음으로 상속**하고 출처를 매니페스트에 적는다.
+
+# %%
+def bundle_predict(parts: dict, X: pd.DataFrame) -> dict:
+    """모델 번들의 부스터로 예측한다.
+
+    노트북의 재로드 검증과 서빙 패키지(`serving/_core.py`, 코드 생성)가 **같은 함수**를 쓴다.
+    5.2절 레짐 모델의 `predict` 와 같은 규칙이다: 게이트가 레짐을 고르고, 그 레짐의
+    회귀 모델이 예측하며, 학습에 없던 레짐으로 배정된 행은 fallback 이 채운다.
+
+    Parameters
+    ----------
+    parts : dict
+        `columns`(피처 순서), `gate`, `gate_features`, `classes`, `regs`({타깃: {레짐: 부스터}}),
+        `fallbacks`({타깃: 부스터}), 선택적으로 `peak_clf`, `quantiles`({분위: 부스터}).
+    X : pandas.DataFrame
+        피처 행렬. 컬럼 순서와 dtype 은 여기서 강제한다.
+
+    Returns
+    -------
+    dict[str, numpy.ndarray]
+        `regime`, `y_avg`, `y_peak`, (있으면) `prob`, `q10`·`q50`·`q90`.
+    """
+    cols = list(parts["columns"])
+    missing = [c for c in cols if c not in X.columns]
+    if missing:
+        raise KeyError(f"피처 누락: {missing[:5]}")
+    # LightGBM 은 컬럼 순서가 바뀌어도 오류 없이 틀린 값을 낸다 → 계약 순서로 재정렬, float64 로 통일
+    Xf = X.reindex(columns=cols).astype(np.float64)
+    arr = Xf.to_numpy()
+
+    gate_p = parts["gate"].predict(Xf[list(parts["gate_features"])].to_numpy())
+    classes = np.asarray(parts["classes"])
+    if gate_p.ndim == 1:
+        # 2분류 게이트: sklearn predict 와 같다(p > 0.5 일 때만 두 번째 클래스)
+        regime = classes[(gate_p > 0.5).astype(int)]
+    else:
+        regime = classes[np.argmax(gate_p, axis=1)]
+    out = {"regime": regime.astype(int)}
+
+    for tgt in ("y_avg", "y_peak"):
+        pred = np.empty(len(Xf), float)
+        assigned = np.zeros(len(Xf), bool)
+        for r, bst in parts["regs"][tgt].items():
+            m = regime == int(r)
+            if m.any():
+                pred[m] = bst.predict(arr[m])
+                assigned |= m
+        if (~assigned).any():
+            pred[~assigned] = parts["fallbacks"][tgt].predict(arr[~assigned])
+        out[tgt] = pred
+
+    if parts.get("peak_clf") is not None:
+        out["prob"] = parts["peak_clf"].predict(arr)
+    for q, bst in (parts.get("quantiles") or {}).items():
+        out[f"q{int(round(float(q) * 100))}"] = bst.predict(arr)
+    return out
+
+
+def manifest_core_sha256(manifest: dict) -> str:
+    """매니페스트 자체의 무결성 해시.
+
+    `bundle_id`·`manifest_sha256` 두 키를 뺀 나머지를 결정적 JSON(키 정렬·UTF-8·NaN 금지)으로
+    직렬화한 sha256 이다. τ·구간 반폭처럼 매니페스트 안에만 있는 값의 변조를 잡는다.
+    노트북 검증과 서빙 로더가 **같은 함수**로 계산한다(코드 생성).
+    """
+    core = {k: v for k, v in manifest.items() if k not in ("bundle_id", "manifest_sha256")}
+    text = json.dumps(core, sort_keys=True, ensure_ascii=False, indent=1, allow_nan=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# %%
+import hashlib  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+import platform  # noqa: E402
+import shutil  # noqa: E402
+import sys  # noqa: E402
+import time as _time  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import lightgbm as lgb  # noqa: E402
+import sklearn  # noqa: E402
+
+BUNDLE_SCHEMA_VERSION = 1
+SERVICE_MODEL_NAME = "2단계 레짐(3분류)"   # 사용자 확정: 서비스 번들은 항상 이 모델
+CLF_MODEL_NAME = "피크 직접분류"
+BUNDLE_BASE = MODEL_DIR / ("fast" if FAST else "full")
+HISTORY_DAYS = {"min": 8, "recommended": 14, "max": 62}
+PLAN_COLUMNS = ["날짜", "시간", "생산량", "공장인원", "기온", "풍속", "습도", "강수량"]
+HISTORY_COLUMNS = ["날짜", "시간", "15분", "30분", "45분", "60분", "평균",
+                   "생산량", "공장인원", "인건비", "기온", "풍속", "습도", "강수량"]
+INTERVAL_ALPHA = 0.9
+GOLDEN_ORIGIN = pd.Timestamp("2021-09-13")   # 자가검증 사례: 09-13 24:00 원점 → 09-14 예측
+GOLDEN_HISTORY_DAYS = 21
+
+
+def _sha256(b: bytes) -> str:
+    """바이트열의 sha256 16진 문자열."""
+    return hashlib.sha256(b).hexdigest()
+
+
+def _json_bytes(obj) -> bytes:
+    """결정적 JSON 바이트 — 키 정렬 · UTF-8 · NaN 금지. OS·로캘과 무관하게 같은 바이트가 나온다."""
+    return json.dumps(obj, sort_keys=True, ensure_ascii=False, indent=1, allow_nan=False).encode("utf-8")
+
+
+def _native(v):
+    """numpy 스칼라·결측을 JSON 호환 파이썬 값으로 바꾼다(결측은 None)."""
+    if v is None:
+        return None
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, (float, np.floating)):
+        return float(v) if np.isfinite(v) else None
+    return v
+
+
+def _booster_bytes(model) -> bytes:
+    """sklearn 래퍼 → LightGBM 네이티브 텍스트 바이트."""
+    return model.booster_.model_to_string().encode("utf-8")
+
+
+def component_files(art: dict) -> dict:
+    """적합 객체 묶음을 `{파일명: LightGBM 텍스트 바이트}` 로 바꾼다."""
+    reg, clf, itv = art["regime"], art["clf"], art["interval"]
+    files = {"gate.lgb": _booster_bytes(reg["gate"])}
+    for tgt in ("y_avg", "y_peak"):
+        for r, m in sorted(reg["regs"][tgt].items()):
+            files[f"reg_{tgt}_r{int(r)}.lgb"] = _booster_bytes(m)
+        files[f"fallback_{tgt}.lgb"] = _booster_bytes(reg["fallbacks"][tgt])
+    files["peak_clf.lgb"] = _booster_bytes(clf["clf"])
+    for q, m in sorted(itv["qmodels"].items()):
+        files[f"interval_q{int(round(q * 100))}.lgb"] = _booster_bytes(m)
+    return files
+
+
+def training_frame(cutoff) -> tuple:
+    """`cutoff` 이전의 사용 가능 행(D1 — 워밍업·계측정지·ERP결측 제외)."""
+    tr = usable_mask(feat, "D1") & (feat.index < cutoff)
+    return feat.loc[tr, FEATURE_COLS], feat.loc[tr, ["y_avg", "y_peak", "y_cls"]]
+
+
+def fit_service_artifacts(cutoff) -> dict:
+    """서비스 번들 구성요소를 `cutoff` 이전 데이터로 적합한다.
+
+    적합 로직을 복제하지 않는다. 5장과 **같은 함수 객체**(`MODEL_REGISTRY`,
+    `fit_interval_models`)를 학습 데이터만 바꿔 호출한다.
+    """
+    Xtr, ytr = training_frame(cutoff)
+    dummy = Xtr.iloc[:24]  # fit_fn 은 검증 X 를 요구한다 — 그 예측은 쓰지 않는다
+    shutdown_days = operating_calendar.index[operating_calendar["is_shutdown"]]
+    return {
+        "regime": MODEL_REGISTRY[SERVICE_MODEL_NAME](Xtr, ytr, dummy)["_artifacts"],
+        "clf": MODEL_REGISTRY[CLF_MODEL_NAME](Xtr, ytr, dummy)["_artifacts"],
+        "interval": fit_interval_models(Xtr, ytr, shutdown_days),
+        "X": Xtr,
+    }
+
+
+def parts_from_artifacts(art: dict) -> dict:
+    """메모리의 적합 객체 → `bundle_predict` 입력(부스터 묶음)."""
+    reg = art["regime"]
+    return {
+        "columns": list(FEATURE_COLS),
+        "gate": reg["gate"].booster_,
+        "gate_features": list(reg["gcols"]),
+        "classes": list(reg["classes"]),
+        "regs": {t: {int(r): m.booster_ for r, m in d.items()} for t, d in reg["regs"].items()},
+        "fallbacks": {t: m.booster_ for t, m in reg["fallbacks"].items()},
+        "peak_clf": art["clf"]["clf"].booster_,
+        "quantiles": {q: m.booster_ for q, m in art["interval"]["qmodels"].items()},
+    }
+
+
+def interval_halfwidths(oof: pd.DataFrame, alpha: float = INTERVAL_ALPHA) -> dict:
+    """최종모델 OOF 절대잔차로 휴무일·운영일별 예측구간 반폭(qhat)을 구한다.
+
+    5.8절 Split Conformal 은 최종모델이 아닌 별도 point 모델이 중심이라 서비스 출력에 쓰지 않는다.
+    여기서는 **최종모델 예측 y_avg 를 중심**으로 두고, 휴무 여부별로 따로 보정한다
+    (OOF 잔차 90% 분위가 휴무일과 운영일에서 크게 다르다). 유한표본 보정 분위를 쓴다.
+    """
+    resid = (oof["y_avg"] - oof["pred_avg"]).abs().to_numpy()
+    shut = operating_calendar["is_shutdown"].reindex(oof.index.normalize()).to_numpy().astype(bool)
+    out = {}
+    for key, m in (("operating", ~shut), ("shutdown", shut)):
+        r = np.sort(resid[m])
+        k = min(int(np.ceil((len(r) + 1) * alpha)), len(r))
+        out[key] = {"qhat": float(r[k - 1]), "n": int(len(r))}
+    return out
+
+
+def interval_bounds(y_avg_pred, is_shutdown, halfwidths: dict) -> tuple:
+    """예측구간 [lo, hi]. 대상일 휴무 여부(피처 `is_shutdown`)로 반폭을 고른다. 하한은 0."""
+    q = np.where(np.asarray(is_shutdown) == 1,
+                 halfwidths["shutdown"]["qhat"], halfwidths["operating"]["qhat"])
+    return np.maximum(y_avg_pred - q, 0.0), y_avg_pred + q
+
+
+def build_golden(parts: dict) -> dict:
+    """서빙 기동 자가검증 사례 — 원시 이력 21일 + 계획 24행 + 기대 피처 + 기대 출력.
+
+    서빙은 이 원시 입력으로 피처를 다시 만들어 기대 피처와 비교하고(피처 코드의 의미 검증),
+    기대 출력과 예측을 비교한다(부스터 로드 검증).
+    """
+    target = GOLDEN_ORIGIN + pd.Timedelta(days=1)
+    ymd = df_raw["날짜"]
+    lo = int((GOLDEN_ORIGIN - pd.Timedelta(days=GOLDEN_HISTORY_DAYS - 1)).strftime("%Y%m%d"))
+    hist = df_raw.loc[(ymd >= lo) & (ymd <= int(GOLDEN_ORIGIN.strftime("%Y%m%d"))), HISTORY_COLUMNS]
+    plan = df_raw.loc[ymd == int(target.strftime("%Y%m%d")), PLAN_COLUMNS]
+    X = feat.loc[feat.index.normalize() == target, FEATURE_COLS]
+    pred = bundle_predict(parts, X)
+
+    def rows(d):
+        return [[_native(v) for v in r] for r in d.itertuples(index=False, name=None)]
+
+    return {
+        "origin": str(GOLDEN_ORIGIN.date()),
+        "target_date": str(target.date()),
+        "history": {"columns": HISTORY_COLUMNS, "rows": rows(hist)},
+        "plan": {"columns": PLAN_COLUMNS, "rows": rows(plan)},
+        "expected_features": {"columns": list(FEATURE_COLS), "rows": X.to_numpy(float).tolist()},
+        "expected": {k: np.asarray(v).tolist() for k, v in pred.items()},
+    }
+
+
+def build_manifest(role: str, art: dict, files: dict, shared: dict) -> dict:
+    """매니페스트 — 타임스탬프·호스트명·절대경로 없이 결정적으로 만든다."""
+    reg, clf = art["regime"], art["clf"]
+    X = art["X"]
+    files_sha = {n: _sha256(b) for n, b in sorted(files.items())}
+    man = {
+        "schema_version": BUNDLE_SCHEMA_VERSION,
+        "role": role,
+        "fast_mode": bool(FAST),
+        "model_name": SERVICE_MODEL_NAME,
+        "report_final_model": FINAL_MODEL_NAME,
+        "is_final_model": FINAL_MODEL_NAME == SERVICE_MODEL_NAME,
+        "training": {
+            "cond": "D1",
+            "excluded_masks": ["is_warmup", "is_outage", "is_erp_missing"],
+            "cutoff_exclusive": str(shared["cutoff"][role]),
+            "n_rows": int(len(X)),
+            "first": str(X.index.min()),
+            "last": str(X.index.max()),
+            "months": sorted(int(m) for m in X.index.month.unique()),
+            "data_file": "data/okm_augumented_2021.csv",
+            "data_sha256": shared["data_sha256"],
+            "used_in_report": role == "eval",
+        },
+        "submission": shared["submission"] if role == "eval" else None,
+        "feature_contract": {
+            "columns": list(FEATURE_COLS),
+            "dtype": "float64",
+            "theta": float(THETA),
+            "theta_note": "피크 정의 임계값(피처 roll*_peak_cnt 에도 쓰임). 서빙에서 다시 계산하지 않는다",
+            "safe_lags": [int(x) for x in SAFE_LAGS],
+            "holidays": [str(d.date()) for d in HOLIDAYS_2021],
+            "holiday_coverage_start": str(df.index.min().date()),
+            "holiday_coverage_end": str(TEST_END.date()),
+            "history_days": HISTORY_DAYS,
+            "plan_columns": PLAN_COLUMNS,
+            "history_columns": HISTORY_COLUMNS,
+        },
+        "components": {
+            "gate": {
+                "file": "gate.lgb", "classes": list(reg["classes"]),
+                "features": list(reg["gcols"]), "n_estimators": int(reg["gate_n_estimators"]),
+                "regime_bins": [30.0, 70.0] if reg["n_classes"] == 3 else [70.0],
+            },
+            "regressors": {
+                t: {str(int(r)): f"reg_{t}_r{int(r)}.lgb" for r in sorted(d)}
+                for t, d in reg["regs"].items()
+            },
+            "fallbacks": {t: f"fallback_{t}.lgb" for t in reg["fallbacks"]},
+            "peak_classifier": {
+                "file": "peak_clf.lgb",
+                "params": clf["params"],
+                "n_estimators": clf["n_estimators"],
+                "scale_pos_weight": clf["scale_pos_weight"],
+                "effective_note": "Optuna best_params 에 bagging_freq 가 없어 bagging_fraction 은 실효 0(비활성)",
+            },
+            "quantiles": {str(q): f"interval_q{int(round(q * 100))}.lgb" for q in sorted(art["interval"]["qmodels"])},
+            "calibrator": "calibrator_isotonic.json",
+            "golden": "golden.json",
+        },
+        "thresholds": shared["thresholds"],
+        "intervals": {
+            "quantile": {
+                "calibrated": False,
+                "fit_last": art["interval"]["fit_last"],
+                "measured_test_coverage_q10_q90": shared["quantile_coverage"] if role == "eval" else None,
+                "note": "분위회귀는 미보정이다(테스트 피복률이 목표 0.8 에 크게 못 미침). 참고용",
+            },
+            "residual": shared["residual"],
+        },
+        "hyperparameters": {
+            "lgb_base": dict(LGB_BASE),
+            "n_estimators": int(N_ESTIMATORS),
+            "regime_uses_optuna": False,
+        },
+        "runtime": {
+            "python": sys.version.split()[0],
+            "lightgbm": lgb.__version__,
+            "numpy": np.__version__,
+            "pandas": pd.__version__,
+            "scikit_learn": sklearn.__version__,
+            "system": platform.system(),
+            "machine": platform.machine(),
+        },
+        "caveats": [
+            f"학습 데이터의 month 범위는 {sorted(int(m) for m in X.index.month.unique())} 이다. 그 밖의 달은 외삽이다",
+            "공휴일표 HOLIDAYS_2021 은 2021-09-14 까지만 검증됐다. 이후 날짜는 운영 휴일표를 주입해야 한다",
+            "Isotonic 보정기는 fold 모델의 OOF 확률로 적합됐고, 보정 후 ECE 0 은 적합 데이터 위의 값이다",
+            "경보 라벨은 보정 전 확률과 tau_cls, 또는 y_peak 예측과 tau 로 정한다",
+        ],
+        "files_sha256": files_sha,
+    }
+    # 매니페스트 자신까지 해시한다 — bundle_id 는 모델 파일과 임계값·계약 전부의 지문이다
+    man["manifest_sha256"] = manifest_core_sha256(man)
+    man["bundle_id"] = f"{role}-{'fast' if FAST else 'full'}-{man['manifest_sha256'][:12]}"
+    return man
+
+
+def write_bundle(bundle_dir, files: dict, manifest: dict) -> None:
+    """번들 디렉터리를 새로 쓴다(이전 실행의 잔여 파일이 섞이지 않도록 먼저 지운다)."""
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir)
+    bundle_dir.mkdir(parents=True)
+    for name, b in files.items():
+        (bundle_dir / name).write_bytes(b)
+    (bundle_dir / "manifest.json").write_bytes(_json_bytes(manifest))
+
+
+def read_bundle_parts(bundle_dir) -> tuple:
+    """번들을 검증하며 읽는다(노트북 재로드 검증용 최소 로더).
+
+    파일을 **바이트로** 읽어 sha256 을 대조한 뒤 `Booster(model_str=...)` 로 연다.
+    서빙 로더(`serving/bundle.py`)는 여기에 버전·FAST·자가검증 정책을 더한다.
+
+    Returns
+    -------
+    (dict, dict, dict)
+        매니페스트, `bundle_predict` 입력, `{파일명: 트리 수}`.
+    """
+    man = json.loads((bundle_dir / "manifest.json").read_bytes())
+    if manifest_core_sha256(man) != man["manifest_sha256"] or not man["bundle_id"].endswith(man["manifest_sha256"][:12]):
+        raise AssertionError("매니페스트 sha256 불일치")
+    raw = {}
+    for name, sha in man["files_sha256"].items():
+        b = (bundle_dir / name).read_bytes()
+        if _sha256(b) != sha:
+            raise AssertionError(f"sha256 불일치: {name}")
+        raw[name] = b
+    boosters = {n: lgb.Booster(model_str=b.decode("utf-8")) for n, b in raw.items() if n.endswith(".lgb")}
+    comp = man["components"]
+    parts = {
+        "columns": man["feature_contract"]["columns"],
+        "gate": boosters[comp["gate"]["file"]],
+        "gate_features": comp["gate"]["features"],
+        "classes": comp["gate"]["classes"],
+        "regs": {t: {int(r): boosters[f] for r, f in d.items()} for t, d in comp["regressors"].items()},
+        "fallbacks": {t: boosters[f] for t, f in comp["fallbacks"].items()},
+        "peak_clf": boosters[comp["peak_classifier"]["file"]],
+        "quantiles": {float(q): boosters[f] for q, f in comp["quantiles"].items()},
+    }
+    return man, parts, {n: int(b.num_trees()) for n, b in boosters.items()}
+
+
+def text_is_clean(b: bytes) -> bool:
+    """매니페스트·JSON 에 절대경로나 실행 계정명이 없는지 본다(블라인드 평가)."""
+    text = b.decode("utf-8")
+    if any(t in text for t in (":\\", ":/", "/home/", "\\Users", "/Users/")):
+        return False
+    # 계정명은 **경로 문맥**에서만 본다 — 'app'·'test'·'data' 같은 흔한 계정명이
+    # 매니페스트의 일반 단어("apply", "data_file")에 걸려 노트북을 멈추지 않게 한다
+    user = Path.home().name
+    return not (user and re.search(r"[\\/]" + re.escape(user) + r"(?:[\\/\"]|$)", text))
+
+
+def outputs_equal(a: dict, b: dict) -> bool:
+    """두 `bundle_predict` 결과가 비트 단위로 같은지."""
+    return a.keys() == b.keys() and all(np.array_equal(a[k], b[k]) for k in a)
+
+
+def run_bundle_section() -> dict:
+    """평가·배포 번들을 만들고 검증한다. 실패하면 AssertionError 로 멈춘다."""
+    checks: dict = {}
+    te_s, te_c = test_results[SERVICE_MODEL_NAME], test_results[CLF_MODEL_NAME]
+    Xte = feat.loc[te_s["index"], FEATURE_COLS]
+    is_final = FINAL_MODEL_NAME == SERVICE_MODEL_NAME
+
+    # ── 교차검증 산출물(τ·τ_cls·보정기·구간 반폭) — 두 번들이 공유 ────────────
+    clf_oof = cv_results[CLF_MODEL_NAME]["oof"]
+    tau = float(cv_results[SERVICE_MODEL_NAME]["tau"])
+    tau_cls = float(tune_tau(clf_oof["y_peak"].to_numpy(), clf_oof["prob"].to_numpy(), THETA))
+    halfwidths = interval_halfwidths(cv_results[SERVICE_MODEL_NAME]["oof"])
+    lo, hi = interval_bounds(te_s["pred_avg"], Xte["is_shutdown"].to_numpy(), halfwidths)
+    y_te = te_s["y_avg"]
+    halfwidths["measured_test_coverage"] = round(float(((y_te >= lo) & (y_te <= hi)).mean()), 4)
+    halfwidths.update({
+        "alpha": INTERVAL_ALPHA, "center": "y_avg_pred",
+        "fit_on": f"{SERVICE_MODEL_NAME} OOF 절대잔차 (fold2~5)",
+    })
+    iso = _calib["iso"]
+    calibrator = {
+        "x_thresholds": [float(x) for x in iso.X_thresholds_],
+        "y_thresholds": [float(y) for y in iso.y_thresholds_],
+        "out_of_bounds": "clip",
+        "fit_on": f"{CLF_MODEL_NAME} OOF 확률 (fold2~5)",
+        "apply": "np.interp(prob, x_thresholds, y_thresholds)",
+    }
+    thresholds = {
+        "tau": {"value": tau, "unit": "kW",
+                "fold_taus": [float(x) for x in cv_results[SERVICE_MODEL_NAME]["fold_metrics"]["τ"]],
+                "method": "fold2~5 검증구간 tune_tau(F1 최대) 의 중앙값", "rule": "y_peak_pred >= tau"},
+        "tau_cls": {"value": tau_cls, "method": "피크 직접분류 OOF 확률에 tune_tau", "rule": "peak_prob >= tau_cls"},
+        "inherited_from": None,
+    }
+    pred_path = OUTPUT_DIR / "predictions_test_336h.csv"
+    shared = {
+        "cutoff": {"eval": TEST_START, "deploy": TEST_END + pd.Timedelta(hours=1)},
+        "data_sha256": _sha256(Path(DATA_PATH).read_bytes()),
+        "submission": {
+            "file": "outputs/predictions_test_336h.csv",
+            "sha256": _sha256(pred_path.read_bytes()),
+            "bound": is_final,
+        },
+        "thresholds": thresholds,
+        "residual": halfwidths,
+        "quantile_coverage": round(float(((y_te >= _unc["lo"]) & (y_te <= _unc["hi"])).mean()), 4),
+    }
+    calib_bytes = _json_bytes(calibrator)
+
+    # ── ① 평가 번들: 제출 예측을 만든 바로 그 적합 객체를 저장한다 ─────────────
+    eval_art = {
+        "regime": te_s["_artifacts"], "clf": te_c["_artifacts"], "interval": _unc["_fit"],
+        "X": training_frame(TEST_START)[0],
+    }
+    eval_files = component_files(eval_art)
+    eval_files["calibrator_isotonic.json"] = calib_bytes
+    eval_files["golden.json"] = _json_bytes(build_golden(parts_from_artifacts(eval_art)))
+    eval_man = build_manifest("eval", eval_art, eval_files, shared)
+    eval_dir = BUNDLE_BASE / "eval"
+    write_bundle(eval_dir, eval_files, eval_man)
+
+    # 재로드 → 메모리 예측(제출 예측을 만든 값)과 비트 비교
+    man_e, parts_e, trees_e = read_bundle_parts(eval_dir)
+    got = bundle_predict(parts_e, Xte)
+    checks["eval_bitwise"] = bool(
+        np.array_equal(got["y_avg"], te_s["pred_avg"])
+        and np.array_equal(got["y_peak"], te_s["pred_peak"])
+        and np.array_equal(got["prob"], te_c["prob"])
+        and np.array_equal(got["q10"], _unc["lo"])
+        and np.array_equal(got["q50"], _unc["mid"])
+        and np.array_equal(got["q90"], _unc["hi"])
+    )
+    if is_final:
+        sub = predictions
+        checks["submission_match"] = bool(
+            np.array_equal(np.round(got["y_avg"], 4), sub["y_avg_pred"].to_numpy())
+            and np.array_equal(np.round(got["y_peak"], 4), sub["y_peak_pred"].to_numpy())
+            and np.array_equal((got["y_peak"] >= tau).astype(int), sub["peak_pred_label"].to_numpy())
+            and np.array_equal(np.round(got["prob"], 6), sub["peak_prob"].to_numpy())
+        )
+    else:
+        checks["submission_match"] = True  # 해당 없음: 제출 파일은 다른 모델로 만들어졌다
+
+    # ── ② 재학습 경로의 결정성: 같은 cutoff 로 다시 적합하면 바이트까지 같아야 한다 ──
+    refit_eval = fit_service_artifacts(TEST_START)
+    refit_files = component_files(refit_eval)
+    checks["refit_sha"] = bool(
+        {n: _sha256(b) for n, b in refit_files.items()}
+        == {n: _sha256(b) for n, b in eval_files.items() if n.endswith(".lgb")}
+        and refit_eval["interval"]["qhat"] == _unc["_fit"]["qhat"]
+    )
+
+    # ── ③ 배포 번들: 전 구간(~09-14) 재학습. CV 산출물은 평가 번들에서 상속한다 ──
+    deploy_art = fit_service_artifacts(TEST_END + pd.Timedelta(hours=1))
+    deploy_shared = {**shared, "thresholds": {**thresholds, "inherited_from": man_e["bundle_id"]},
+                     "residual": {**halfwidths, "inherited_from": man_e["bundle_id"]}}
+    deploy_files = component_files(deploy_art)
+    deploy_files["calibrator_isotonic.json"] = calib_bytes
+    deploy_parts_mem = parts_from_artifacts(deploy_art)
+    deploy_files["golden.json"] = _json_bytes(build_golden(deploy_parts_mem))
+    deploy_man = build_manifest("deploy", deploy_art, deploy_files, deploy_shared)
+    deploy_dir = BUNDLE_BASE / "deploy"
+    write_bundle(deploy_dir, deploy_files, deploy_man)
+    man_d, parts_d, trees_d = read_bundle_parts(deploy_dir)
+    checks["deploy_reload"] = outputs_equal(bundle_predict(parts_d, Xte), bundle_predict(deploy_parts_mem, Xte))
+
+    # ── ④ 무결성·개인정보 ───────────────────────────────────────────────────
+    checks["integrity"] = bool(checks["deploy_reload"]) and man_e["files_sha256"] == {
+        n: _sha256(b) for n, b in sorted(eval_files.items())
+    }
+    json_files = [p for p in BUNDLE_BASE.rglob("*.json")]
+    checks["manifest_clean"] = all(text_is_clean(p.read_bytes()) for p in json_files)
+
+    # 순수 추론시간(336h) — 출력만 한다. 보고서의 INFER_SEC 는 바꾸지 않는다.
+    times = []
+    for _ in range(10):
+        t0 = _time.perf_counter()
+        bundle_predict(parts_e, Xte)
+        times.append(_time.perf_counter() - t0)
+
+    rows = []
+    for man, trees, bdir in ((man_e, trees_e, eval_dir), (man_d, trees_d, deploy_dir)):
+        for name, sha in list(man["files_sha256"].items()) + [
+            ("manifest.json", _sha256((bdir / "manifest.json").read_bytes()))
+        ]:
+            rows.append({
+                "번들": man["role"], "모드": "FAST" if man["fast_mode"] else "FULL",
+                "bundle_id": man["bundle_id"], "파일": name, "sha256": sha,
+                "bytes": len((bdir / name).read_bytes()),
+                "트리수": trees.get(name, 0), "학습행수": man["training"]["n_rows"],
+            })
+    return {
+        "checks": checks, "table": pd.DataFrame(rows),
+        "eval_id": man_e["bundle_id"], "deploy_id": man_d["bundle_id"],
+        "infer_sec": float(np.median(times)), "tau": tau, "tau_cls": tau_cls,
+        "halfwidths": halfwidths, "is_final": is_final,
+        "n_eval": man_e["training"]["n_rows"], "n_deploy": man_d["training"]["n_rows"],
+    }
+
+
+if os.environ.get("KAMP_SKIP_BUNDLE") == "1":
+    # 비상 탈출구 — 번들 버그 때문에 제출 노트북 실행 전체를 잃지 않게 한다. 최종 게이트는 실패로 남는다.
+    BUNDLE_CHECKS = {k: False for k in ("integrity", "eval_bitwise", "submission_match", "refit_sha", "manifest_clean")}
+    BUNDLE_SUMMARY = None
+    # 이전 실행의 번들·표가 남아 있으면 오래된 산출물을 가리키게 되므로 지운다
+    if BUNDLE_BASE.exists():
+        shutil.rmtree(BUNDLE_BASE)
+    (TBL_DIR / "ch6_model_bundles.csv").unlink(missing_ok=True)
+    print("⚠️ KAMP_SKIP_BUNDLE=1 — 모델 번들 저장을 건너뛰었다 (최종 게이트 미통과로 기록)")
+else:
+    BUNDLE_SUMMARY = run_bundle_section()
+    BUNDLE_CHECKS = BUNDLE_SUMMARY["checks"]
+    save_table(BUNDLE_SUMMARY["table"], "ch6_model_bundles")
+    BUNDLE_INFER_SEC = BUNDLE_SUMMARY["infer_sec"]
+    print(f"── 모델 번들 저장 ({'FAST' if FAST else 'FULL'}) ──")
+    print(f"  평가 번들 {BUNDLE_SUMMARY['eval_id']}  (학습 {BUNDLE_SUMMARY['n_eval']:,}행, ~08-31)")
+    print(f"  배포 번들 {BUNDLE_SUMMARY['deploy_id']}  (학습 {BUNDLE_SUMMARY['n_deploy']:,}행, ~09-14)")
+    print(f"  τ = {BUNDLE_SUMMARY['tau']!r} kW (반올림 없음) · τ_cls = {BUNDLE_SUMMARY['tau_cls']!r}")
+    _hw = BUNDLE_SUMMARY["halfwidths"]
+    print(
+        f"  예측구간 반폭 운영일 ±{_hw['operating']['qhat']:.2f} / 휴무일 ±{_hw['shutdown']['qhat']:.2f} kW"
+        f" → 테스트 피복률 {_hw['measured_test_coverage']:.3f} (목표 {INTERVAL_ALPHA})"
+    )
+    print(f"  번들 순수 추론 336시간 = {BUNDLE_INFER_SEC * 1000:.1f} ms (10회 중앙값, 보고서 INFER_SEC 와 별개)")
+    display(pd.DataFrame(list(BUNDLE_CHECKS.items()), columns=["점검", "통과"]))
+    if not all(BUNDLE_CHECKS.values()):
+        raise AssertionError(f"모델 번들 검증 실패: {[k for k, v in BUNDLE_CHECKS.items() if not v]}")
+
+# %% [markdown]
+# ### 10.6 발표자료 골격 · 개인정보 스캔
 #
 # - **목적**: 발표자료 pptx 골격을 만들고, **제출 전 개인정보를 스캔**한다.
 # - **보고서 대응절**: 6장, 제출물
@@ -608,7 +1204,7 @@ print(f"── README.md ({len(_readme):,}자) · report_ch6_draft.md 생성 완
 # > 그래서 제출 직전에 **반드시** 다음을 실행한다.
 # >
 # > ```bash
-# > python build/finalize_notebook.py
+# > python tools/finalize_notebook.py
 # > ```
 # >
 # > 이 스크립트가 stderr 출력을 제거하고 잔여 경로를 치환한 뒤 후스캔한다.
@@ -737,7 +1333,9 @@ _USER = _Path.home().name
 
 PRIVACY_PATTERNS = {
     "사용자명": re.escape(_USER),
-    "Windows 절대경로": r"[Cc]:\+[Uu]sers",
+    # 역슬래시는 `\\+` 로 써야 잡힌다. `\+` 는 리터럴 '+' 라 실제 윈도 사용자 경로를 한 번도 못 잡았다.
+    # (이 주석에 예시 경로를 쓰지 않는다 — finalize 가 셀 소스를 그대로 스캔한다)
+    "Windows 절대경로": r"[Cc]:\\+[Uu]sers",
     "홈 경로": r"/(?:home|Users)/[A-Za-z0-9_가-힣]+",
     "이메일": r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
     "절대경로 출력": r"os\.getcwd\(\)",
@@ -829,6 +1427,8 @@ def scan_privacy() -> pd.DataFrame:
     targets += sorted(TBL_DIR.glob("*.csv"))
     targets += sorted(PROJECT_ROOT.glob("src/*.py"))
     targets += sorted(PROJECT_ROOT.glob("tests/*.py"))
+    # 10.5절 모델 번들의 매니페스트·자가검증 JSON (절대경로·계정명이 들어가면 안 된다)
+    targets += sorted(MODEL_DIR.rglob("*.json"))
 
     for f in targets:
         if f.name in SCANNER_SELF:
@@ -940,6 +1540,12 @@ def final_gate() -> pd.DataFrame:
         ("이중 축·freq='H' 0건", len(forbidden_scan) == 0),
         ("제출 대상 개인정보 0건", len(privacy_blocking) == 0),
         ("채움표 30항목 이상", len(tbd_tbl) >= 30),
+        # 10.5절 모델 번들 — 번들 절이 실패하면 이미 예외로 멈추므로 여기서는 결과만 기록한다
+        ("서비스 번들 2종 생성·sha256 무결성", bool(BUNDLE_CHECKS.get("integrity"))),
+        ("평가 번들 재로드 예측 == 메모리 예측(비트)", bool(BUNDLE_CHECKS.get("eval_bitwise"))),
+        ("번들 예측 == 제출 파일 (최종모델=번들모델일 때)", bool(BUNDLE_CHECKS.get("submission_match"))),
+        ("재학습 경로 sha 재현 · 번들 JSON 경로·계정명 0건",
+         bool(BUNDLE_CHECKS.get("refit_sha")) and bool(BUNDLE_CHECKS.get("manifest_clean"))),
     ]
     out = pd.DataFrame(checks, columns=["점검", "통과"])
     return out
@@ -965,4 +1571,6 @@ print(f"  최대수요 저감   : {PEAK_REDUCTION_KW:.1f} kW (전체기간 기�
 print(f"  그림            : {len(list(FIG_DIR.glob('F*.png')))}장")
 print(f"  표              : {len(list(TBL_DIR.glob('*.csv')))}개")
 print(f"  FAST 모드       : {FAST}  {'← 제출 전 FULL 재실행 필요' if FAST else ''}")
+if BUNDLE_SUMMARY is not None:
+    print(f"  모델 번들       : {BUNDLE_SUMMARY['eval_id']} / {BUNDLE_SUMMARY['deploy_id']}")
 print("=" * 64)

@@ -111,12 +111,16 @@ def validate(nb: nbformat.NotebookNode) -> dict:
         for pat, why in [
             (r"^from s\d\d_\w+ import", "stage 간 import 잔존"),
             (r"^(?!\s*[\"']).*\bos\.getcwd\(\)", "CWD 출력 금지(블라인드)"),
-            (r"C:\\\\Users", "절대경로 잔존(블라인드)"),
+            # 역슬래시 개수·대소문자·슬래시 표기와 무관하게 윈도 사용자 경로를 잡는다
+            (r"[Cc]:[\\/]+[Uu]sers", "절대경로 잔존(블라인드)"),
             (
                 r"(?:date_range|resample|period_range|Grouper)\s*\([^)]*freq\s*=\s*['\"]H['\"]",
                 "pandas 3.x 크래시 (freq='H')",
             ),
             (r"\.twinx\(\)", "이중 축 금지"),
+            # 모델 번들(10.5절): 한글이 든 절대경로에서 LightGBM 파일 API 가 실패한다 → 바이트 + model_str 만
+            (r"model_file\s*=|\.save_model\(", "LightGBM 파일 API 금지(model_str 사용)"),
+            (r"^\s*(?:from|import)\s+serving\b", "serving 패키지 import 금지(자기완결)"),
         ]:
             if re.search(pat, code, re.MULTILINE):
                 strays.append(why)

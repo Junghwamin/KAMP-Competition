@@ -60,7 +60,7 @@ def _label(name: str, korean: str) -> str:
     return name
 
 
-def add_calendar_features(d: pd.DataFrame, cal: pd.DataFrame) -> pd.DataFrame:
+def add_calendar_features(d: pd.DataFrame, cal: pd.DataFrame, holidays=None) -> pd.DataFrame:
     """달력·공정상태 파생변수를 추가한다.
 
     모두 예측 원점에서 확정적으로 알 수 있는 정보다(달력은 미래에도 기지).
@@ -71,10 +71,14 @@ def add_calendar_features(d: pd.DataFrame, cal: pd.DataFrame) -> pd.DataFrame:
         datetime 인덱스를 가진 시간별 데이터.
     cal : pandas.DataFrame
         1.4절에서 도출한 일별 가동 캘린더.
+    holidays : array-like of datetime, optional
+        공휴일 목록. 기본은 `HOLIDAYS_2021`(학습 구간). 서비스에서 2021-09-14 이후
+        날짜를 예측할 때 운영 휴일표를 주입하는 통로다(노트북 결과에는 영향 없음).
     """
     out = d.copy()
     idx = out.index
     day = idx.normalize()
+    hol = HOLIDAYS_2021 if holidays is None else pd.DatetimeIndex(holidays)
 
     # ── 시간정보 ──────────────────────────────────────────────────────
     out[_label("hour", "시간")] = idx.hour
@@ -83,7 +87,7 @@ def add_calendar_features(d: pd.DataFrame, cal: pd.DataFrame) -> pd.DataFrame:
     # 토·일을 분리한다 — 단일 '주말' 플래그로는 3레짐을 표현할 수 없다
     out[_label("is_sat", "토요일")] = (idx.dayofweek == 5).astype(int)
     out[_label("is_sun", "일요일")] = (idx.dayofweek == 6).astype(int)
-    out[_label("is_holiday", "공휴일")] = day.isin(HOLIDAYS_2021).astype(int)
+    out[_label("is_holiday", "공휴일")] = day.isin(hol).astype(int)
     # 주기형 인코딩 — 23시와 0시가 인접함을 모델에 알려준다
     out[_label("hour_sin", "시간 sin")] = np.sin(2 * np.pi * idx.hour / 24)
     out[_label("hour_cos", "시간 cos")] = np.cos(2 * np.pi * idx.hour / 24)
@@ -270,7 +274,7 @@ FEATURE_GROUPS = {
 FEATURE_COLS = [c for cols in FEATURE_GROUPS.values() for c in cols]
 
 
-def build_features(d: pd.DataFrame, cal: pd.DataFrame, theta: float) -> pd.DataFrame:
+def build_features(d: pd.DataFrame, cal: pd.DataFrame, theta: float, holidays=None) -> pd.DataFrame:
     """전체 피처 파이프라인. 누수 검증에서 재호출하므로 **순수 함수**로 둔다.
 
     Parameters
@@ -281,13 +285,15 @@ def build_features(d: pd.DataFrame, cal: pd.DataFrame, theta: float) -> pd.DataF
         가동 캘린더.
     theta : float
         피크 정의 임계값(이동통계의 피크 발생건수에 사용).
+    holidays : array-like of datetime, optional
+        공휴일 목록. 기본 `HOLIDAYS_2021` (→ `add_calendar_features`).
 
     Returns
     -------
     pandas.DataFrame
         원본 + 파생변수. 워밍업 구간은 NaN 으로 남는다.
     """
-    out = add_calendar_features(d, cal)
+    out = add_calendar_features(d, cal, holidays)
     out = add_lag_features(out)
     out = add_origin_stats(out, build_origin_frame(d, theta))
     out = add_production_weather_features(out)

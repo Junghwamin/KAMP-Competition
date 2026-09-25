@@ -27,6 +27,9 @@ STAGES_DIR = PROJECT_ROOT / "src"
 # stage 모듈을 import 가능하게
 if str(STAGES_DIR) not in sys.path:
     sys.path.insert(0, str(STAGES_DIR))
+# 서빙 패키지(serving/)를 `pytest` 단독 실행에서도 import 가능하게
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(1, str(PROJECT_ROOT))
 if str(PROJECT_ROOT / "tools") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 

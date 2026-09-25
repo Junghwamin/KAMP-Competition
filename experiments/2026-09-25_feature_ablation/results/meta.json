@@ -1,0 +1,21 @@
+{
+ "noise_band_mae": 0.2002651500495105,
+ "noise_band_peak_mae": 0.9617955094386197,
+ "n_variants_d1": 62,
+ "n_variants_d2": 9,
+ "d2_ids": [
+  "G-과거전력",
+  "L168",
+  "B+W",
+  "SA-all",
+  "SA-168",
+  "LOFO-y_avg_lag48",
+  "LOFO-y_peak_lag24",
+  "LOFO-wind"
+ ],
+ "total_sec": 808.7,
+ "python": "3.11.9",
+ "lightgbm": "4.7.0",
+ "pandas": "3.0.5",
+ "numpy": "2.3.5"
+}
