@@ -102,7 +102,8 @@ reference/                대회 원본 자료 (과제공개, 보고서양식, �
 video/                    해설·강의 영상 (1080p, 한글 자막 트랙 내장) — 목차는 video/README.md
   ep01~ep06_*.mp4           개요 해설 6편 (43분)
   모델/ · 평가지표/          모델 9편 · 평가지표 13편 강의 (2시간 53분)
-                            용량이 커서(합계 약 700MB) 제출 zip 에 넣을지는 따로 정하세요
+  서빙/                     모델이 서비스가 되기까지 — 번들 저장·검증·예측·CLI/API 7편 (63분, 비개발자용 용어 정의 포함)
+                            용량이 커서(합계 약 950MB) 제출 zip 에 넣을지는 따로 정하세요
 experiments/              격리된 실험 기록 — 피처 제거 확인·게이트 수정안·보고서 docx 편집·포드 패키지 (제출 zip 제외, 색인 experiments/README.md)
 _dev_docs/                개발 문서 — 제출 zip 에는 넣지 마세요
 ```
@@ -158,7 +159,7 @@ bash run.sh serve                               # REST API (127.0.0.1:8000)
 | 모델 성능 비교표 | `outputs/tables/ch2_regression.csv`, `ch2_peak_detection.csv` |
 | 피크 저감 시나리오 | `outputs/tables/ch4_scenarios.csv` |
 | 4·5·6장 본문 초안 | `outputs/report_ch4_draft.md` · `ch5` · `ch6` |
-| 영상으로 이해하기 (개요 6편 + 모델·평가지표 강의 22편) | [`video/README.md`](video/README.md) |
+| 영상으로 이해하기 (개요 6편 + 모델·평가지표 강의 22편 + 서빙 e2e 7편) | [`video/README.md`](video/README.md) |
 | 결과보고서 (현재 작업본 v3) | `보고서/` (docx · 미리보기 PDF) |
 | 제출 뒤 분석·서비스 제안 (피처 제거 확인, 휴무 오분류 수정안) | [`experiments/README.md`](experiments/README.md) (저장소에만 있음 · 제출 zip 미포함) |
 

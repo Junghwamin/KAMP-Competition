@@ -86,7 +86,7 @@ PYTHONHASHSEED=42 KAMP_FAST=1 python -X utf8 -m pytest tests/test_s05_models.py:
 - 블라인드 평가: `finalize` 는 노트북 **셀 소스를 주석 포함 그대로** 스캔한다. 예시 경로를 주석에도 쓰지 말 것. `outputs/` 안에서 셸 작업 디렉터리를 옮겨 도구를 돌리면 도구 상태 파일이 생겨 스캔에 걸린다.
 - 생성 파일·JSON 은 `write_bytes(...encode("utf-8"))` 로 쓴다(Windows `write_text` 는 CRLF·cp949 가 섞여 sha 가 달라진다). `.gitattributes` 가 `*.sh`·`*.py` 를 LF 로 고정한다(pod 실행용).
 - s10 은 루트 `README.md`·`requirements.txt` 를 쓰지 않는다(사람이 관리하는 `00_README.md`·`requirements.txt` 보호). 6장 본문은 `outputs/report_ch6_draft.md` 로만 나간다.
-- 제출 zip 에서 제외: `_dev_docs/`, `experiments/`, `outputs/models/`, 각 폴더 `CLAUDE.local.md`, 이 `CLAUDE.md`(개발 안내, 제외 권장), `.git/`, `.omc/`, `.cache/`, `__pycache__/`, `outputs/*.log`(설치 경로가 박히는데 스캔 대상이 아님), 빈 `outputs/baseline_repro/`. `video/`(약 700MB)는 용량 때문에 별도 결정. `serving/` 은 zip 에 포함한다(없는 환경에서는 서빙 테스트 5개 모듈이 `importorskip` 으로 건너뛴다).
+- 제출 zip 에서 제외: `_dev_docs/`, `experiments/`, `outputs/models/`, 각 폴더 `CLAUDE.local.md`, 이 `CLAUDE.md`(개발 안내, 제외 권장), `.git/`, `.omc/`, `.cache/`, `__pycache__/`, `outputs/*.log`(설치 경로가 박히는데 스캔 대상이 아님), 빈 `outputs/baseline_repro/`. `video/`(약 950MB — 1부 6편·2부 22편·3부 서빙 7편)는 용량 때문에 별도 결정. `serving/` 은 zip 에 포함한다(없는 환경에서는 서빙 테스트 5개 모듈이 `importorskip` 으로 건너뛴다).
   git 추적 여부와 별개이므로 작업 폴더를 그대로 압축하지 말고 목록대로 뺀다(00_README '제출물과의 관계'와 같은 목록). 결과의 정직한 한계는 `03_RESULTS.md`, 증상별 대처는 `04_TROUBLESHOOTING.md`.
 - 폴더별 `CLAUDE.local.md`(src·tests·tools·serving·outputs 등, gitignore 대상)에 그 폴더 전용 메모가 있다. 그 폴더를 고치기 전에 읽는다.
 - `verify-head` 의 `ch6_model_bundles`(bundle_id·manifest sha)는 **같은 OS 에서만** 일치한다 — 매니페스트 `runtime` 에 OS 정보가 들어가 해시가 달라진다. OS 가 다르면 이 표는 반드시 다르고, 다른 표도 부동소수 차이로 달라질 수 있다(pod 실행은 미검증).
