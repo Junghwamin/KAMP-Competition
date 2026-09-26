@@ -7,6 +7,7 @@ from s00_env import (  # noqa: F401
     HAS_TF,
     INK,
     INK_SOFT,
+    MODEL_DIR,
     PALETTE_ADJACENT,
     SEED,
     TBL_DIR,
@@ -67,6 +68,7 @@ import matplotlib.pyplot as plt
 
 # %%
 import lightgbm as lgb  # noqa: E402
+from tools.model_persistence import save_model_archive, state_from_output  # noqa: E402
 
 # 재현성: 심사위원 PC의 코어 수와 무관하게 동일 결과가 나오도록 고정한다
 LGB_BASE = dict(
@@ -162,6 +164,16 @@ def run_test(name: str, fit_fn, cond: str = "D1", features=None) -> dict:
     pa = np.asarray(out["pred_avg"], float)
     pp = np.asarray(out.get("pred_peak", pa), float)
     prob = out.get("prob")
+    if features is None:
+        expected = {"pred_avg": pa, "pred_peak": pp}
+        if prob is not None:
+            expected["prob"] = prob
+        save_model_archive(
+            MODEL_DIR / "comparison" / ("fast" if FAST else "full") / cond, name, state_from_output(out),
+            Xtr.columns, Xte, expected,
+            {"fast": FAST, "condition": cond, "seed": SEED,
+             "train_start": str(Xtr.index.min()), "train_end": str(Xtr.index.max())},
+        )
     return {
         "name": name, "cond": cond, "index": idx,
         "y_avg": yte["y_avg"].to_numpy(), "y_peak": yte["y_peak"].to_numpy(),
@@ -390,7 +402,7 @@ def dnn_fit(Xtr, ytr, Xva):
     xsc = StandardScaler().fit(Xtr)
     Xtr_s, Xva_s = xsc.transform(Xtr), xsc.transform(Xva)
 
-    preds = {}
+    preds, models, yscalers = {}, {}, {}
     for tgt in ("y_avg", "y_peak"):
         ysc = StandardScaler().fit(ytr[[tgt]])
         model = keras.Sequential(
@@ -423,7 +435,9 @@ def dnn_fit(Xtr, ytr, Xva):
         preds[tgt] = ysc.inverse_transform(
             model.predict(Xva_s, verbose=0).reshape(-1, 1)
         ).ravel()
-    return {"pred_avg": preds["y_avg"], "pred_peak": preds["y_peak"]}
+        models[tgt], yscalers[tgt] = model, ysc
+    return {"pred_avg": preds["y_avg"], "pred_peak": preds["y_peak"],
+            "_persist": {"kind": "keras", "models": models, "yscalers": yscalers, "xsc": xsc}}
 
 
 # %% [markdown]
@@ -561,6 +575,7 @@ def naive_fit(Xtr, ytr, Xva):
     return {
         "pred_avg": Xva["y_avg_lag168"].to_numpy(),
         "pred_peak": Xva["y_peak_lag168"].to_numpy(),
+        "_persist": {"kind": "naive", "lag_hours": 168},
         "_predict": lambda X: X["y_avg_lag168"].to_numpy(),
     }
 
@@ -671,6 +686,8 @@ if ensemble_info.get("채택"):
         return {
             "pred_avg": _w * np.asarray(a["pred_avg"]) + (1 - _w) * np.asarray(b["pred_avg"]),
             "pred_peak": _w * np.asarray(a["pred_peak"]) + (1 - _w) * np.asarray(b["pred_peak"]),
+            "_persist": {"kind": "ensemble", "names": [_n1, _n2], "weight": _w,
+                         "members": [state_from_output(a), state_from_output(b)]},
         }
 
     MODEL_REGISTRY["앙상블"] = ensemble_fit

@@ -51,6 +51,9 @@ import matplotlib.pyplot as plt
 # 공장 부하가 주 단위로 반복되므로 이 단순 규칙이 의외로 강한 기준선이 된다.
 
 # %%
+from tools.model_persistence import save_model_archive
+
+
 def seasonal_naive_predict(d: pd.DataFrame, target: str = "y_avg", lag: int = 168) -> pd.Series:
     """168시간 전 동일 시각 값을 예측값으로 반환한다."""
     return d[target].shift(lag)
@@ -144,6 +147,13 @@ def run_rnn_original(d: pd.DataFrame) -> dict:
     lo, rng_ = scaler.data_min_[0], scaler.data_range_[0]
     pred = pred_sc * rng_ + lo
     true = yte * rng_ + lo
+    save_model_archive(
+        MODEL_DIR / "baselines" / ("fast" if FAST else "full"), "rnn_original",
+        {"kind": "rnn_original", "model": model, "scaler": scaler},
+        mat.columns[1:], mat.iloc[-n_test:, 1:], {"pred_avg": pred},
+        {"fast": FAST, "epochs": RNN_EPOCHS, "advance": N_TIMES_ADVANCE,
+         "windows": N_TIMES_WINDOWS, "reshape": [24, 7], "scaler_fit": "full_data_original_defect"},
+    )
     return {
         "모델": "Simple RNN (원본)",
         "예측지평": "1시간 앞",
@@ -218,6 +228,12 @@ def run_rf_original(d: pd.DataFrame) -> tuple[dict, np.ndarray, list]:
 
     mse_tr = float(mean_squared_error(rf.predict(Xtr), ytr))
     mse_te = float(mean_squared_error(rf.predict(Xte), yte))
+    save_model_archive(
+        MODEL_DIR / "baselines" / ("fast" if FAST else "full"), "rf_original",
+        {"kind": "regressors", "models": {"y_avg": rf}, "frozen_exogenous": frozen},
+        feat_names, Xte, {"pred_avg": rf.predict(Xte)},
+        {"fast": FAST, "preprocessing": "frozen first-row exogenous plus current quarter-hour power"},
+    )
     return (
         {
             "모델": "Random Forest (원본)",
@@ -381,6 +397,11 @@ def run_rf_corrected(cond: str = "D1") -> dict:
     )
     rf.fit(Xtr, ytr["y_avg"])
     pred = rf.predict(Xte)
+    save_model_archive(
+        MODEL_DIR / "baselines" / ("fast" if FAST else "full") / cond, "rf_corrected",
+        {"kind": "regressors", "models": {"y_avg": rf}},
+        Xtr.columns, Xte, {"pred_avg": pred}, {"fast": FAST, "condition": cond},
+    )
     return {
         "모델": "Random Forest (보정)",
         "예측지평": "Day-ahead",
@@ -428,6 +449,12 @@ def run_rnn_corrected(cond: str = "D1") -> dict:
         callbacks=[keras.callbacks.EarlyStopping("val_mae", patience=20, restore_best_weights=True)],
     )
     pred = ysc.inverse_transform(model.predict(Xte_s, verbose=0).reshape(-1, 1)).ravel()
+    save_model_archive(
+        MODEL_DIR / "baselines" / ("fast" if FAST else "full") / cond, "rnn_corrected",
+        {"kind": "keras", "models": {"y_avg": model}, "xsc": sc,
+         "yscalers": {"y_avg": ysc}, "reshape": [1, Xtr.shape[1]]},
+        Xtr.columns, Xte, {"pred_avg": pred}, {"fast": FAST, "condition": cond},
+    )
     return {
         "모델": "Simple RNN (보정)",
         "예측지평": "Day-ahead",

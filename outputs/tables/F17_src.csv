@@ -4,4 +4,4 @@
 2,LightGBM,15.355,5.475
 3,Random Forest (보정),19.478,6.039
 4,Seasonal Naive,28.372,6.542
-5,DNN (MLP),31.038,10.487
+5,DNN (MLP),32.544,10.294
